@@ -1,0 +1,43 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <ApplicationIcon>resources\ponyo.ico</ApplicationIcon>
+    <RootNamespace>PonyoWallpaper</RootNamespace>
+    <AssemblyName>PonyoWallpaper</AssemblyName>
+    <Version>1.0.0</Version>
+    <!-- 对外显示名统一为「Ponyo壁纸」（AssemblyName / 数据目录 / 互斥体名保持不变，兼容已有安装） -->
+    <Product>Ponyo壁纸</Product>
+    <Company>Ponyo壁纸</Company>
+    <Title>Ponyo壁纸</Title>
+    <Description>Ponyo壁纸 · wallhaven 自动换壁纸</Description>
+    <!-- 体积/内存优化：固定不变文化（省 ICU 内存）、去掉多语言卫星资源 -->
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <!-- 体积/内存优化第二梯队 -->
+    <UseSystemResourceKeys>true</UseSystemResourceKeys>
+    <EventSourceSupport>false</EventSourceSupport>
+    <MetadataUpdaterSupport>false</MetadataUpdaterSupport>
+    <!-- 常驻托盘低分配场景：关后台 GC + GC 节省内存档位（上限 5），以轻微 CPU 换更低工作集 -->
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <RuntimeHostConfigurationOption Include="System.GC.Conserve" Value="5" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="resources\ponyo.ico">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Update="resources\ponyo_app_icon.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <EmbeddedResource Include="resources\ponyo.ico" />
+  </ItemGroup>
+
+</Project>

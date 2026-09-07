@@ -1,0 +1,13 @@
+<Project>
+  <!--
+    Workaround: machine-level env VERSION=V7.26.20SP2 pollutes MSBuild property
+    and breaks NuGet restore. Permanent fix: remove env var at Machine level (requires admin).
+
+    仅在 Version 未定义时兜底 1.0.0（csproj 的 <Version> 在其后求值、必然覆盖）。
+    此前这里硬编码 1.0.0，把 csproj 里每次的版本号升级全部吞掉——
+    这就是设置页版本号"一直不变"的根因。
+  -->
+  <PropertyGroup Condition="'$(Version)' == ''">
+    <Version>1.0.0</Version>
+  </PropertyGroup>
+</Project>

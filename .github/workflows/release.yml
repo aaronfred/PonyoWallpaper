@@ -1,0 +1,68 @@
+name: Release
+
+# 推送 v* tag 自动发布；也支持 Actions 页面手动触发
+# 方案 B：双产物 —— full（self-contained 单文件）+ lite（framework-dependent 单文件）
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Publish full (self-contained single-file)
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}" -replace '^v', ''
+          dotnet publish PonyoWallpaper.csproj `
+            -c Release `
+            -r win-x64 `
+            --self-contained true `
+            -p:Version=$tag `
+            -p:PublishSingleFile=true `
+            -p:IncludeNativeLibrariesForSelfExtract=true `
+            -p:EnableCompressionInSingleFile=true `
+            -o publish-full
+
+      - name: Publish lite (framework-dependent single-file)
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}" -replace '^v', ''
+          dotnet publish PonyoWallpaper.csproj `
+            -c Release `
+            -r win-x64 `
+            --self-contained false `
+            -p:Version=$tag `
+            -p:PublishSingleFile=true `
+            -p:IncludeNativeLibrariesForSelfExtract=true `
+            -o publish-lite
+
+      - name: Zip both
+        shell: pwsh
+        run: |
+          Compress-Archive -Path publish-full/PonyoWallpaper.exe -DestinationPath "PonyoWallpaper-${{ github.ref_name }}-win-x64-full.zip"
+          Compress-Archive -Path publish-lite/PonyoWallpaper.exe  -DestinationPath "PonyoWallpaper-${{ github.ref_name }}-win-x64-lite.zip"
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            PonyoWallpaper-${{ github.ref_name }}-win-x64-full.zip
+            PonyoWallpaper-${{ github.ref_name }}-win-x64-lite.zip
+          generate_release_notes: true
+          body: |
+            - **full**：自包含单文件，解压即用，无需安装 .NET（约 43MB）
+            - **lite**：精简单文件，需已安装 .NET 10 Desktop Runtime（约 1MB）
