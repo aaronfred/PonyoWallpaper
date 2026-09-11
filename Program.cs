@@ -206,21 +206,9 @@ internal static class Program
 
             void UpdateTooltip(WallpaperItem? it)
             {
-                var keys = cfg.RotationChannels is { Count: > 0 }
-                    ? cfg.RotationChannels
-                    : Channels.All.Select(c => c.Key).ToList();
-                string scope;
-                if (keys.Count > 3) scope = $"{keys.Count} 个频道";
-                else
-                {
-                    scope = string.Join("+", keys.Select(k =>
-                        k == "nsfw" ? "NSFW" : Channels.Find(k)?.Name ?? k));
-                    if (scope.Length == 0) scope = "未选择";
-                }
-                var tip = $"Ponyo壁纸 · 自动更换 {scope} · {cfg.IntervalMinutes}分/张";
-                if (it != null) tip += $"\n当前: {it.Id}";
-                tip += "\nCtrl+Alt+N/P 下一张/上一张";
-                tray.SetTooltip(tip);
+                // 托盘 ToolTip 只保留快捷键提示，不再显示「自动更换 X 个频道」（避免与首页底部按钮重复）
+                _ = it; // 保留入参供未来扩展
+                tray.SetTooltip("Ctrl+Alt+N/P 下一张/上一张");
             }
             UpdateTooltip(null);
 

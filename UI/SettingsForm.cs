@@ -247,8 +247,7 @@ internal sealed class SettingsForm : Form
             AutoSize = true,
             Font = new Font("Microsoft YaHei UI", 8),
             ForeColor = Color.FromArgb(170, 170, 170),
-            Location = new Point(16, 20),
-            Cursor = Cursors.Hand
+            Location = new Point(16, 20)
         };
         versionLbl.Click += (_, _) =>
         {
@@ -305,7 +304,6 @@ internal sealed class SettingsForm : Form
         Controls.Add(footer);
 
         // 悬停提示：功能 + 快捷键
-        _tips.SetToolTip(versionLbl, "连点 5 次（或 Ctrl+Shift+K）唤出隐藏设置，需输入访问密码");
         _tips.SetToolTip(btnHosts, "代理管理（代理池 / 更新 / 源地址）与 hosts 管理");
         _tips.SetToolTip(btnOpenLogs, "打开日志文件夹（ hosts 更新、轮换等操作的详细日志）");
         _tips.SetToolTip(btnSave, "所有改动已即时保存，此按钮仅关闭窗口");
