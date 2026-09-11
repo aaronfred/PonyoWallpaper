@@ -33,12 +33,30 @@ internal sealed class MasonryPanel : Panel
     public int CardCount => _cards.Count;
     public IReadOnlyList<WallpaperCard> Cards => _cards;
 
+    /// <summary>常驻卡片上限。超出后释放最早加入的卡片（含其缩略图），
+    /// 避免同一频道无限下拉时缩略图持续堆积——这是后台内存偏高的主因。</summary>
+    private const int MaxCards = 240;
+
     public void AddCard(WallpaperCard card)
     {
         _cards.Add(card);
         Controls.Add(card);
+        TrimExcess();
         Relayout();
         RequestVisibleThumbs();
+    }
+
+    /// <summary>从最早加入的卡片开始释放，直到数量回到上限内。</summary>
+    private void TrimExcess()
+    {
+        while (_cards.Count > MaxCards)
+        {
+            var oldest = _cards[0];
+            _cards.RemoveAt(0);
+            _thumbRequested.Remove(oldest);
+            Controls.Remove(oldest);
+            oldest.Dispose();
+        }
     }
 
     public void RemoveCard(WallpaperCard card)

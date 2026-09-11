@@ -9,7 +9,7 @@
     <ApplicationIcon>resources\ponyo.ico</ApplicationIcon>
     <RootNamespace>PonyoWallpaper</RootNamespace>
     <AssemblyName>PonyoWallpaper</AssemblyName>
-    <Version>1.0.0</Version>
+    <Version>1.1.0</Version>
     <!-- 对外显示名统一为「Ponyo壁纸」（AssemblyName / 数据目录 / 互斥体名保持不变，兼容已有安装） -->
     <Product>Ponyo壁纸</Product>
     <Company>Ponyo壁纸</Company>

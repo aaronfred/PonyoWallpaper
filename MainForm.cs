@@ -34,6 +34,7 @@ internal sealed class MainForm : Form
     private readonly ComboBox _cboMonitors = new();
     private Button _btnRotScope = new();
     private ToolStripDropDown _rotMenu = new();
+    private int _buildingRotationMenu;   // RebuildRotationMenu 期间抑制「调整范围触发换壁纸」
 
     private string _currentChannelKey = "";
     private string _currentCategory = "";
@@ -532,6 +533,9 @@ internal sealed class MainForm : Form
         _cfg.RotationChannels = list;
         _cfg.Save();
         UpdateRotScopeText();
+        // 用户主动调整范围：立即换一次壁纸（从新范围里抽一张）。
+        // 初始化/重建菜单期间的 Checked 赋值不触发，避免启动时连环换壁纸。
+        if (_buildingRotationMenu == 0) _ = _engine.NextAsync();
     }
 
     /// <summary>按钮上显示当前自动更换范围摘要。</summary>
@@ -551,10 +555,15 @@ internal sealed class MainForm : Form
 
     private void RebuildRotationMenu()
     {
-        var old = _rotMenu;
-        _rotMenu = BuildRotationMenu();
-        UpdateRotScopeText();
-        if (old is IDisposable d) d.Dispose();
+        _buildingRotationMenu++;
+        try
+        {
+            var old = _rotMenu;
+            _rotMenu = BuildRotationMenu();
+            UpdateRotScopeText();
+            if (old is IDisposable d) d.Dispose();
+        }
+        finally { _buildingRotationMenu--; }
     }
 
     private void BuildTree()
@@ -626,8 +635,31 @@ internal sealed class MainForm : Form
     protected override void OnResize(EventArgs e)
     {
         base.OnResize(e);
-        // 最小化到任务栏：结束 NSFW 会话（切回普通频道 + 锁定 + 移除节点）
-        if (WindowState == FormWindowState.Minimized) LeaveNsfwSession();
+        // 最小化：结束 NSFW 会话（切回普通频道 + 锁定 + 移除节点）并释放缩略图
+        if (WindowState == FormWindowState.Minimized)
+        {
+            LeaveNsfwSession();
+            ReleaseCardsForBackground();
+        }
+        else if (WindowState == FormWindowState.Normal && Visible && _releasedForBackground)
+        {
+            // 从托盘恢复：缩略图已释放，重新拉回当前频道
+            _releasedForBackground = false;
+            Reload();
+        }
+    }
+
+    private bool _releasedForBackground;
+
+    /// <summary>缩到托盘后释放全部卡片与缩略图，让后台常驻内存回到基线。
+    /// 此前最小化只是 Hide 窗口，缩略图仍全部常驻，后台占用因此居高不下。</summary>
+    private void ReleaseCardsForBackground()
+    {
+        if (_flow.CardCount == 0) return;
+        _releasedForBackground = true;
+        _page = 1;
+        _ended = false;
+        ClearCards();
     }
 
     /// <summary>设置保存后由外部调用：NSFW 入口显示状态可能变化，重建分类树与轮换菜单。</summary>
@@ -820,17 +852,9 @@ internal sealed class MainForm : Form
     /// <summary>图片基础信息（单行）：ID · 分辨率 · 分类 · 分级 · 大小 · 详情链接。</summary>
     private static string BuildItemInfo(WallpaperItem it)
     {
-        var cat = it.Category switch
-        {
-            "anime" => "动漫", "people" => "人物", "general" => "综合", _ => it.Category
-        };
-        var pur = it.Purity switch
-        {
-            "sketchy" => "Sketchy", "nsfw" => "NSFW", _ => "SFW"
-        };
         var size = it.FileSize > 0 ? $" · {it.FileSize / 1048576.0:F1}MB" : "";
         var url = string.IsNullOrEmpty(it.PageUrl) ? "" : $" · {it.PageUrl}";
-        return $"{it.Id} · {it.Resolution} · {cat} · {pur}{size}{url}";
+        return $"{it.Id} · {it.Resolution}{size}{url}";
     }
 
     private void AddCard(WallpaperItem item)
@@ -956,7 +980,11 @@ internal sealed class MainForm : Form
 
             // 关键：必须在 img 释放前克隆。BeginInvoke 是异步投递的，
             // 若在 lambda 内 Clone，届时 img 已被 using 释放 → ArgumentException
-            var copy = (Image)img.Clone();
+            // 必须缩放到显示尺寸再交付卡片：原图 300x200 解码后 234KB/张，而卡片只显示 190px 宽。
+            // 原样 Clone 会让无限下拉累积出上百 MB（实测浏览后私有内存 63MB → 233MB）。
+            // 缩到 240px 宽（卡片 190px 的 1.26x 余量，兼容高分屏），单张降到约 150KB。
+            var scaledH = Math.Max(1, (int)(240.0 / img.Width * img.Height));
+            var copy = new Bitmap(img, new Size(240, scaledH));
 
             if (IsHandleCreated && !IsDisposed)
             {
