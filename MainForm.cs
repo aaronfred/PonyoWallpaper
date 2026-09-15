@@ -45,6 +45,7 @@ internal sealed class MainForm : Form
     private Button _btnRotScope = new();
     private ToolStripDropDown _rotMenu = new();
     private int _buildingRotationMenu;   // RebuildRotationMenu 期间抑制「调整范围触发换壁纸」
+    private bool _syncingSelectAll;      // SyncSelectAll 回写「全选」勾选期间，抑制其 CheckedChanged 批处理
 
     private string _currentChannelKey = "";
     private string _currentCategory = "";
@@ -478,27 +479,41 @@ internal sealed class MainForm : Form
                 item.CheckedChanged += (_, _) =>
                 {
                     UpdateRotationChannel(ch.Key, item.Checked);
-                    SyncSelectAll(selAll, parent, chs);
+                    // 批处理（点「全选」）期间不回写「全选」自身，等整批结束后统一校正，
+                    // 避免中途把 selAll 拉来拉去
+                    if (_buildingRotationMenu == 0) SyncSelectAll(selAll, parent, chs);
                     SetParentCheckState(parent, chs);
                 };
                 parent.DropDownItems.Add(item);
             }
 
-            // 「全选」：勾选=选满本类，取消勾选=清空本类（v1.2.0 需求 2，取代单独的「清除」按钮）
+            // 「全选」：勾选=选满本类，取消勾选=清空本类 —— 同一个项来回切换（v1.2.0 需求 2）
             selAll.CheckedChanged += (_, _) =>
             {
-                _buildingRotationMenu++;
+                // SyncSelectAll 反向同步引起的勾选变化不是用户操作，直接忽略；
+                // 否则批处理中途「尚未全部选中」的中间态会被回写成未勾选，导致整批被撤销
+                if (_syncingSelectAll) return;
+
+                // 关键：先把本次操作的目标状态捕获下来。循环里绝不能再读 selAll.Checked ——
+                // 子项逐个变化时会触发 SyncSelectAll 回写 selAll，读到中间态就会漏勾后面的子项。
+                var want = selAll.Checked;
                 bool changed = false;
-                foreach (ToolStripItem sub in parent.DropDownItems)
+                _buildingRotationMenu++;
+                try
                 {
-                    // 只动带 Tag 的频道项（全选项自身与分隔线无 Tag）
-                    if (sub is ToolStripMenuItem mi && mi.Tag is string && mi.Checked != selAll.Checked)
+                    foreach (ToolStripItem sub in parent.DropDownItems)
                     {
-                        mi.Checked = selAll.Checked;   // 触发各自的 CheckedChanged 完成写入
-                        changed = true;
+                        // 只动带 Tag 的频道项（全选项自身与分隔线无 Tag）
+                        if (sub is ToolStripMenuItem mi && mi.Tag is string && mi.Checked != want)
+                        {
+                            mi.Checked = want;   // 触发各自的 CheckedChanged 完成写入
+                            changed = true;
+                        }
                     }
                 }
-                _buildingRotationMenu--;
+                finally { _buildingRotationMenu--; }
+
+                SyncSelectAll(selAll, parent, chs);   // 批处理结束，按最终状态校正「全选」自身
                 if (!changed) return;   // 反向同步（子项变化引起）无需额外动作，避免递归与重复换壁纸
                 SetParentCheckState(parent, chs);
                 UpdateRotScopeText();
@@ -574,16 +589,19 @@ internal sealed class MainForm : Form
 
     /// <summary>
     /// 反向同步：子项逐个变化时，更新「全选」项自身的勾选状态（全选✓ / 否则空）。
-    /// 该方法只改 selAll.Checked，不直接改子项；若子项已全部一致则 Checked 不变、
-    /// 不触发 selAll.CheckedChanged，从而避免与全选逻辑递归。
+    /// 只改 selAll.Checked，不直接改子项；写入期间置 _syncingSelectAll 抑制 selAll 的批处理，
+    /// 从而避免「点全选 → 回写 → 反向撤销」的递归。
     /// </summary>
-    private static void SyncSelectAll(ToolStripMenuItem selAll, ToolStripMenuItem parent, List<ChannelDef> chs)
+    private void SyncSelectAll(ToolStripMenuItem selAll, ToolStripMenuItem parent, List<ChannelDef> chs)
     {
         if (chs.Count == 0) return;
         var all = chs.All(c => parent.DropDownItems
             .Cast<ToolStripItem>()
             .Any(i => i is ToolStripMenuItem mi && (string?)mi.Tag == c.Key && mi.Checked));
-        if (selAll.Checked != all) selAll.Checked = all;
+        if (selAll.Checked == all) return;
+        _syncingSelectAll = true;
+        try { selAll.Checked = all; }
+        finally { _syncingSelectAll = false; }
     }
 
     private void UpdateRotationChannel(string key, bool onSelect)
