@@ -40,6 +40,12 @@ internal class AppConfig
     /// </summary>
     public List<string>? ProxySourceUrls { get; set; }
 
+    /// <summary>
+    /// 每个代理源的连续失败次数（v1.2.0）。成功一次即清零；达到 3 次则从 ProxySourceUrls 中剔除。
+    /// 用于避免每次更新都去请求已经死掉的源。
+    /// </summary>
+    public Dictionary<string, int>? ProxySourceFails { get; set; }
+
     /// <summary>公共代理池（自动探测产出，程序自管理，只读展示）。默认首次启动后台探测。</summary>
     public List<string>? PublicProxyUrls { get; set; }
 
@@ -67,6 +73,18 @@ internal class AppConfig
 
     /// <summary>代理认证密码（本地配置明文存储，仅本机使用）。</summary>
     public string ProxyPassword { get; set; } = "";
+
+    /// <summary>设置页手填的代理地址（如 socks5://127.0.0.1:7890）。锁定后链路只使用它。</summary>
+    public string ManualProxy { get; set; } = "";
+
+    /// <summary>true = 锁定使用 ManualProxy：不参与自动优选、不静默降级到其他链路。</summary>
+    public bool ManualProxyLocked { get; set; } = false;
+
+    /// <summary>
+    /// 公共代理池扫描模式：quiet（默认，16 并发仅手动触发）/ normal / aggressive / off。
+    /// 见 docs/v1.2.0-优化方案.md 2.5.2：企业环境避免主动外连大量代理节点。
+    /// </summary>
+    public string ProxyScanMode { get; set; } = "quiet";
 
     /// <summary>最后浏览的树节点：频道 key / "fav" / "nsfw"，用于重启恢复选中。</summary>
     public string Sub { get; set; } = "";

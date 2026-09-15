@@ -9,7 +9,7 @@
     <ApplicationIcon>resources\ponyo.ico</ApplicationIcon>
     <RootNamespace>PonyoWallpaper</RootNamespace>
     <AssemblyName>PonyoWallpaper</AssemblyName>
-    <Version>1.1.0</Version>
+    <Version>1.2.0</Version>
     <!-- 对外显示名统一为「Ponyo壁纸」（AssemblyName / 数据目录 / 互斥体名保持不变，兼容已有安装） -->
     <Product>Ponyo壁纸</Product>
     <Company>Ponyo壁纸</Company>
@@ -38,6 +38,9 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
     <EmbeddedResource Include="resources\ponyo.ico" />
+    <!-- 反代搭建指引内嵌进 exe：点击按钮时若 exe 同目录没有该 txt，
+         自动从内嵌资源释放出来再用默认程序打开（单文件发布不会把外部 txt 放到磁盘） -->
+    <EmbeddedResource Include="docs\反代搭建指引.txt" LogicalName="ponyo-mirror-guide.txt" />
   </ItemGroup>
 
 </Project>

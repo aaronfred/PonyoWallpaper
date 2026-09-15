@@ -144,18 +144,35 @@ internal static class Program
             AppPaths.SetCacheRoot(cfg.CacheDirPath);
             var api = new WallhavenClient(cfg.ApiKey, cfg.ProxyUrl, cfg.ProxyUser, cfg.ProxyPassword, cfg.ProxyUrls);
             api.SetMirrors(cfg.CfProxyUrls); // CF 反代：启用后对应链路直连反代
+            api.SetManualProxy(cfg.ManualProxy, cfg.ManualProxyLocked); // v1.2.0：手填代理锁定（重启后保持）
             var cache = new CacheManager(AppPaths.CacheFullDir, AppPaths.CacheThumbDir, cfg.CacheLimitMb);
             var engine = new RotationEngine(cfg, api, cache);
             var history = new HistoryStore();
             var favorites = new ListStore(AppPaths.FavoritesFile);
             var blacklist = new ListStore(AppPaths.BlacklistFile);
 
-            // 首次启动/公共代理池过期：后台自动探测公共代理（http/https/socks5 不限，不阻塞界面）。
-            // 用户代理（设置里识别成功的）优先于公共池。
-            _ = ProxyTester.EnsurePublicPoolAsync(cfg, api);
-            // 免费代理寿命以小时计：每 6 小时后台保活一次（内部有新鲜度判定，池健康则跳过）
+            // v1.2.0：代理扫描默认 Quiet（不自动外连大量代理节点，避免企业网络告警），仅手动触发。
+            // 唯一例外：完全没有任何可用链路（无反代、无手填、无历史公共池）时自动跑一次，保证开箱可用。
+            // 模式见 docs/v1.2.0-优化方案.md 2.5.2：off / quiet(默认) / normal / aggressive
+            var scanMode = (cfg.ProxyScanMode ?? "quiet").ToLowerInvariant();
+            var hasAnyLink = (cfg.CfProxyUrls?.Count ?? 0) > 0
+                             || !string.IsNullOrWhiteSpace(cfg.ManualProxy)
+                             || (cfg.ProxyUrls?.Count ?? 0) > 0;
+            var poolEmpty = (cfg.PublicProxyUrls?.Count ?? 0) == 0;
+            var autoScan = scanMode is "normal" or "aggressive"
+                           || (scanMode != "off" && !hasAnyLink && poolEmpty);
+            if (autoScan)
+            {
+                Logger.Info($"public pool auto scan (mode={scanMode}, firstRunNoLink={!hasAnyLink && poolEmpty})");
+                _ = ProxyTester.EnsurePublicPoolAsync(cfg, api);
+            }
+            // 免费代理寿命以小时计：每 6 小时后台保活一次（仅 normal/aggressive 自动执行；quiet/off 需手动）
             using var poolKeepAlive = new System.Threading.Timer(
-                _ => { try { ProxyTester.EnsurePublicPoolAsync(cfg, api).GetAwaiter().GetResult(); } catch { /* 静默 */ } },
+                _ =>
+                {
+                    if (scanMode is not ("normal" or "aggressive")) return;
+                    try { ProxyTester.EnsurePublicPoolAsync(cfg, api).GetAwaiter().GetResult(); } catch { /* 静默 */ }
+                },
                 null, TimeSpan.FromHours(6), TimeSpan.FromHours(6));
 
             using var mainForm = new MainForm(cfg, api, cache, engine, history, favorites, blacklist);
@@ -187,6 +204,13 @@ internal static class Program
 
             tray.OnNext += async () => await engine.NextAsync();
             tray.OnPrev += async () => await engine.PrevAsync();
+            // 托盘右键「收藏当前壁纸」：把桌面上正在用的那张加入收藏夹（面板可能是隐藏的 → 用气泡反馈）
+            tray.OnFavoriteCurrent += () =>
+            {
+                var msg = mainForm.FavoriteCurrentWallpaper();
+                mainForm.InvokeSetStatus(msg);
+                tray.ShowBalloon("Ponyo壁纸 · 收藏", msg);
+            };
             tray.OnShowMain += () =>
             {
                 mainForm.Show();

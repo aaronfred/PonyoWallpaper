@@ -21,7 +21,13 @@ internal sealed class SettingsForm : Form
     private readonly NumericUpDown _cacheLimit = new();
     private readonly CheckBox _autostart = new();
     private readonly CheckBox _startMinimized = new();
-    private readonly Label _lblActive = new();
+    // v1.2.0：当前代理 = 一个可编辑文本框（显示当前生效代理，也可直接手填）+ 下方等宽状态条
+    private readonly TextBox _txtProxy = new();
+    private readonly Label _lblProxyInfo = new();
+    private int? _lastLatency;          // 最近一次实测延迟（null = 未测，-1 = 不可达）
+    private readonly System.Windows.Forms.Timer _proxyTimer = new() { Interval = 800 };
+    private bool _applyingProxy;        // 程序回填文本框时抑制其 TextChanged 自动应用
+    private const int LatencyThresholdMs = 2000;   // 延迟阈值（实测正常值约 840ms）
     private readonly System.Windows.Forms.Timer _uiTimer = new() { Interval = 5000 };
     private readonly ComboBox _theme = new();
 
@@ -32,7 +38,7 @@ internal sealed class SettingsForm : Form
     private int _versionClicks;
     private bool _loadingValues;   // LoadValues 回填期间抑制控件事件，防止打开设置就触发主窗口重建
     private readonly ToolTip _tips = new();
-    private const int BaseHeight = 492;
+    private const int BaseHeight = 532;
     private const int HiddenPanelHeight = 116;
 
     public SettingsForm(AppConfig cfg, WallhavenClient api, CacheManager cache, Action onSaved,
@@ -50,8 +56,10 @@ internal sealed class SettingsForm : Form
 
         Build();
         LoadValues();
-        _uiTimer.Tick += (_, _) => { _lblActive.Text = _api.ActiveTier + " - " + _api.ActiveProxyName; };
+        _uiTimer.Tick += (_, _) => { if (!_txtProxy.Focused) UpdateProxyUi(); };
         _uiTimer.Start();
+        // 打开设置页即实测一次当前链路延迟（v1.2.0 需求 4）
+        Shown += (_, _) => _ = RefreshLatencyAsync();
         KeyPreview = true;
         KeyDown += (_, e) =>
         {
@@ -65,37 +73,54 @@ internal sealed class SettingsForm : Form
         var rows = new Panel { Dock = DockStyle.Fill };
 
         // 固定坐标行布局，避免 TableLayoutPanel 行错位
-        PlaceRow(rows, 0, "缓存配额（MB）", _cacheLimit);
+        var y = 16;
+        y = PlaceRow(rows, y, "缓存配额（MB）", _cacheLimit);
 
-        // 当前代理（【方式 - 地址】格式：直连/反代/用户代理/公共池），5 秒轮询 + 变更即时刷新。
-        // 代理的配置全部移至「代理管理」（设置底部按钮）。
-        // 右侧「优选代理」：不抓新源，只从现有链路（直连/反代/用户代理/公共池）实测最快的一级并切换。
-        var activePanel = new Panel { Width = 300, Height = 28 };
-        _lblActive.Dock = DockStyle.Fill;
-        _lblActive.AutoSize = false;
-        _lblActive.TextAlign = ContentAlignment.MiddleLeft;
-        _lblActive.AutoEllipsis = true;
-        _lblActive.ForeColor = Color.FromArgb(216, 90, 48);
+        // 当前代理（v1.2.0）：一个可编辑文本框 + 「优选代理」按钮 + 下方等宽状态条。
+        // 文本框显示当前生效的代理，也可直接手填（手填即锁定使用）；清空并失焦则回到自动链路。
+        // 「优选代理」= 自动功能：实测各条链路后自动切换到最快的一级，并把结果回填进文本框。
+        var proxyPanel = new Panel { Width = 340, Height = 52 };
+        _txtProxy.SetBounds(0, 0, 240, 26);   // 与上方「缓存配额」等宽，右缘对齐
+        _txtProxy.Font = new Font("Microsoft YaHei UI", 9);
+        _txtProxy.PlaceholderText = "留空=自动；可手填 socks5://127.0.0.1:7890";
+        _txtProxy.TextChanged += (_, _) =>
+        {
+            if (_applyingProxy || _loadingValues) return;
+            _proxyTimer.Stop(); _proxyTimer.Start();   // 停手 800ms 自动应用
+        };
+        _txtProxy.Leave += (_, _) => { _proxyTimer.Stop(); ApplyProxyInput(); };
+        _proxyTimer.Tick += (_, _) => { _proxyTimer.Stop(); ApplyProxyInput(); };
+
         var btnPickBest = new Button
         {
             Text = "优选代理",
-            Dock = DockStyle.Right,
-            Width = 96,
+            Bounds = new Rectangle(248, 0, 92, 26),
             Font = new Font("Microsoft YaHei UI", 9),
             FlatStyle = FlatStyle.Flat
         };
         btnPickBest.FlatAppearance.BorderSize = 1;
         btnPickBest.FlatAppearance.BorderColor = Color.FromArgb(200, 200, 200);
         btnPickBest.Click += async (_, _) => await PickBestProxyAsync(btnPickBest);
-        activePanel.Controls.Add(_lblActive);
-        activePanel.Controls.Add(btnPickBest);
-        PlaceRow(rows, 1, "当前代理", activePanel);
-        activePanel.Size = new Size(300, 28);
-        _tips.SetToolTip(btnPickBest, "从现有链路（直连 / 反代 / 用户代理 / 公共池）中实测最快的一级并立即切换，不抓取新代理");
 
-        PlaceRow(rows, 2, "开机自启", _autostart);
-        PlaceRow(rows, 3, "启动最小化到托盘", _startMinimized);
-        PlaceRow(rows, 4, "界面主题", _theme);
+        // 状态条：左缘与文本框齐，右缘延伸到「优选代理」按钮右缘（= 240 + 8 间隙 + 92）
+        _lblProxyInfo.SetBounds(0, 28, 340, 24);
+        _lblProxyInfo.AutoSize = false;
+        _lblProxyInfo.TextAlign = ContentAlignment.MiddleLeft;
+        _lblProxyInfo.Font = new Font("Microsoft YaHei UI", 8);
+        _lblProxyInfo.ForeColor = Color.FromArgb(105, 105, 105);
+        _lblProxyInfo.BackColor = Color.FromArgb(245, 245, 245);
+
+        proxyPanel.Controls.Add(_txtProxy);
+        proxyPanel.Controls.Add(btnPickBest);
+        proxyPanel.Controls.Add(_lblProxyInfo);
+        y = PlaceRow(rows, y, "当前代理", proxyPanel, 52);
+        proxyPanel.Size = new Size(340, 52);
+        _tips.SetToolTip(btnPickBest, "实测现有各条链路并自动切换到最快的一级，结果填入文本框");
+        _tips.SetToolTip(_txtProxy, "显示当前生效的代理；可直接手填（socks5:// 或 http://，可含 user:pass@）并自动锁定使用；清空则回到自动链路");
+
+        y = PlaceRow(rows, y, "开机自启", _autostart);
+        y = PlaceRow(rows, y, "启动最小化到托盘", _startMinimized);
+        y = PlaceRow(rows, y, "界面主题", _theme);
 
         // 缓存清理 + 完全清理（同一行两个按钮）
         var btnClearCache = new Button
@@ -123,7 +148,7 @@ internal sealed class SettingsForm : Form
         var clearPanel = new Panel { Width = 240, Height = 28 };
         clearPanel.Controls.Add(btnWipe);
         clearPanel.Controls.Add(btnClearCache);
-        PlaceRow(rows, 5, "清理", clearPanel);
+        y = PlaceRow(rows, y, "清理", clearPanel);
 
         // 缓存地址：打开文件夹 / 更换文件夹
         var cacheBtnPanel = new Panel { Width = 240, Height = 28 };
@@ -150,7 +175,7 @@ internal sealed class SettingsForm : Form
         btnCachePath.Click += (_, _) => ChangeCachePath();
         cacheBtnPanel.Controls.Add(btnCachePath);
         cacheBtnPanel.Controls.Add(btnOpenCache);
-        PlaceRow(rows, 6, "缓存地址", cacheBtnPanel);
+        y = PlaceRow(rows, y, "缓存地址", cacheBtnPanel);
 
         // 即时保存并生效
         _cacheLimit.Minimum = 100; _cacheLimit.Maximum = 10240;
@@ -388,9 +413,9 @@ internal sealed class SettingsForm : Form
         return info;
     }
 
-    private static void PlaceRow(Panel root, int row, string label, Control ctrl)
+    /// <summary>固定坐标行布局（避免 TableLayoutPanel 行错位）。返回下一行的 y，支持变高行。</summary>
+    private static int PlaceRow(Panel root, int y, string label, Control ctrl, int height = 28)
     {
-        int y = 16 + row * 40;
         root.Controls.Add(new Label
         {
             Text = label,
@@ -399,9 +424,10 @@ internal sealed class SettingsForm : Form
             Font = new Font("Microsoft YaHei UI", 9)
         });
         ctrl.Location = new Point(170, y);
-        ctrl.Size = new Size(240, 28);
+        ctrl.Size = new Size(240, height);
         ctrl.Font = new Font("Microsoft YaHei UI", 9);
         root.Controls.Add(ctrl);
+        return y + height + 12;
     }
 
     private void LoadValues()
@@ -414,6 +440,7 @@ internal sealed class SettingsForm : Form
             _cacheLimit.Value = Math.Clamp(_cfg.CacheLimitMb, 100, 10240);
             _autostart.Checked = AutostartHelper.IsEnabled();
             _startMinimized.Checked = _cfg.StartMinimized;
+            _txtProxy.Text = _cfg.ManualProxy ?? "";
             _theme.SelectedIndex = Math.Clamp(_cfg.Theme, 0, 2);
             _apiKey.Text = _cfg.ApiKey;
             _chkShowNsfw.Checked = _cfg.ShowNsfw;
@@ -433,28 +460,117 @@ internal sealed class SettingsForm : Form
     /// 优选代理：从现有链路（直连 / 反代 / 用户代理 / 公共池）并发实测，切换到最快且可用的一级。
     /// 不抓取任何新代理，速度远快于「更新代理池」。
     /// </summary>
+    /// <summary>刷新「当前代理」行文字：层级 · 名称 · 延迟（延迟为空时只显示前两项）。</summary>
+    /// <summary>
+    /// 刷新代理区：文本框显示当前生效的代理地址（用户正在输入时不覆盖），
+    /// 状态条显示「类型 + 延迟」，超阈值时追加提示。
+    /// </summary>
+    private void UpdateProxyUi()
+    {
+        if (!_txtProxy.Focused)
+        {
+            _applyingProxy = true;
+            var addr = _api.ActiveProxyAddress;
+            if (_txtProxy.Text != addr) _txtProxy.Text = addr;
+            _applyingProxy = false;
+        }
+        var lat = _lastLatency switch
+        {
+            null => "未测",
+            -1 => "不可达",
+            int v => v + " ms"
+        };
+        var bad = _lastLatency == null || _lastLatency == -1 || _lastLatency > LatencyThresholdMs;
+        // 状态条已延展到「优选代理」右缘（340px），文案可恢复完整表述
+        _lblProxyInfo.Text = $"类型：{_api.ActiveTier}    延迟：{lat}"
+            + (bad ? "    ⚠ 建议点「优选代理」" : "");
+        _lblProxyInfo.ForeColor = bad ? Color.FromArgb(196, 90, 48) : Color.FromArgb(105, 105, 105);
+    }
+
+    /// <summary>实测当前链路延迟（内部连测 2 次取较小值，抗偶发尖峰）并刷新状态条。</summary>
+    private async Task RefreshLatencyAsync()
+    {
+        UpdateProxyUi();
+        var ms = await _api.MeasureActiveLatencyAsync();
+        if (IsDisposed) return;
+        _lastLatency = ms ?? -1;   // -1 = 不可达
+        UpdateProxyUi();
+    }
+
+    /// <summary>
+    /// 应用文本框里的代理（手填后自动触发：停手 800ms 或失焦）。
+    /// 有值 → 实测后锁定使用；不可用 → 不静默降级，状态条提示可去获取公共代理；
+    /// 空值 → 退出锁定、回到自动链路（替代原「恢复自动」按钮）。
+    /// </summary>
+    private async Task ApplyProxyInput()
+    {
+        if (_applyingProxy || _loadingValues) return;
+        var url = _txtProxy.Text.Trim();
+
+        if (url.Length == 0)
+        {
+            if (_cfg.ManualProxyLocked || (_cfg.ManualProxy ?? "").Length > 0)
+            {
+                _cfg.ManualProxy = "";
+                _cfg.ManualProxyLocked = false;
+                _cfg.Save();
+                _api.SetManualProxy("", false);
+                _onProxyChanged?.Invoke();
+            }
+            await RefreshLatencyAsync();
+            return;
+        }
+
+        _lblProxyInfo.Text = "正在测试该代理…";
+        var r = await ProxyTester.ProbeAsync(new[] { url }, 1, 6);
+        if (IsDisposed) return;
+
+        _cfg.ManualProxy = url;
+        if (r.Count == 0)
+        {
+            _cfg.ManualProxyLocked = false;
+            _cfg.Save();
+            _api.SetManualProxy(url, false);
+            _lastLatency = -1;
+            UpdateProxyUi();
+            _lblProxyInfo.Text = "类型：手填代理    延迟：不可用    ⚠ 可在「代理管理」获取公共代理";
+            _lblProxyInfo.ForeColor = Color.FromArgb(196, 90, 48);
+            return;
+        }
+
+        _cfg.ManualProxyLocked = true;
+        _cfg.Save();
+        _api.SetManualProxy(url, true);
+        _onProxyChanged?.Invoke();
+        await RefreshLatencyAsync();
+    }
+
     private async Task PickBestProxyAsync(Button btn)
     {
         var old = btn.Text;
         btn.Enabled = false;
         btn.Text = "优选中…";
-        _lblActive.Text = "正在实测各条链路…";
+        _lblProxyInfo.Text = "正在实测各条链路…";
         try
         {
             var r = await _api.PickBestAsync();
             if (r == null)
             {
-                _lblActive.Text = "无可用链路";
+                _lastLatency = -1;
+                UpdateProxyUi();
                 MessageBox.Show(
                     "当前所有链路（直连 / 反代 / 用户代理 / 公共池）都无法访问 wallhaven。\n\n" +
                     "建议：在「代理管理」中填入反代地址，或点「更新代理源」重新抓取公共代理。",
                     "优选代理", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
-            _lblActive.Text = $"{r.Value.Name} · {r.Value.Ms}ms";
+            // 优选 = 自动功能：切到最快一级后把结果回填文本框（用户仍可再手改）
+            _cfg.ManualProxyLocked = false;
+            _cfg.ManualProxy = "";
+            _cfg.Save();
+            _lastLatency = r.Value.Ms;
+            UpdateProxyUi();
             _onProxyChanged?.Invoke();
-            MessageBox.Show($"已切换到最快链路：\n{r.Value.Name}\n延迟 {r.Value.Ms}ms",
-                "优选代理", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
         finally
         {
