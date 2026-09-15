@@ -3,7 +3,7 @@ namespace PonyoWallpaper;
 /// <summary>
 /// 系统托盘图标 + 右键菜单。
 /// - 左键双击 / 单击打开主界面
-/// - 右键菜单：下一张 / 上一张 / 打开主界面 / 设置 / 退出
+/// - 右键菜单：下一张 / 上一张 / 收藏当前壁纸 / 打开主界面 / 设置 / 退出
 /// - 托盘标题（Tooltip）显示当前频道 + 下一张倒计时
 /// </summary>
 internal sealed class TrayIcon : IDisposable
@@ -25,6 +25,9 @@ internal sealed class TrayIcon : IDisposable
         var prev = new ToolStripMenuItem("上一张（缓存随机）");
         prev.Click += (_, _) => OnPrev?.Invoke();
 
+        var favCurrent = new ToolStripMenuItem("收藏当前壁纸");
+        favCurrent.Click += (_, _) => OnFavoriteCurrent?.Invoke();
+
         var show = new ToolStripMenuItem("打开主界面");
         show.Click += (_, _) => OnShowMain?.Invoke();
 
@@ -36,7 +39,7 @@ internal sealed class TrayIcon : IDisposable
 
         _menu.Items.AddRange(new ToolStripItem[]
         {
-            next, prev, new ToolStripSeparator(), show, settings, new ToolStripSeparator(), exit
+            next, prev, favCurrent, new ToolStripSeparator(), show, settings, new ToolStripSeparator(), exit
         });
 
         _ni = new NotifyIcon
@@ -55,6 +58,7 @@ internal sealed class TrayIcon : IDisposable
 
     public event Action? OnNext;
     public event Action? OnPrev;
+    public event Action? OnFavoriteCurrent;
 
     public void SetTooltip(string text)
     {

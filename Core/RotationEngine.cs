@@ -18,6 +18,12 @@ internal sealed class RotationEngine : IDisposable
     public event Action<WallpaperItem>? OnRotated;
     public WallpaperItem? Current => _current;
 
+    /// <summary>
+    /// 外部同步「当前壁纸」——手动设为壁纸（卡片 / 预览 / 托盘）时调用，
+    /// 使状态栏右键的「收藏当前壁纸」始终指向桌面上真正在用的那张。
+    /// </summary>
+    public void SetCurrent(WallpaperItem item) => _current = item;
+
     public RotationEngine(AppConfig cfg, WallhavenClient api, CacheManager cache)
     {
         _cfg = cfg; _api = api; _cache = cache;

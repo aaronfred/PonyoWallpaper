@@ -28,6 +28,9 @@ internal sealed class WallhavenClient : IDisposable
     private string? _poolPass;
     private int _chainIdx;
     private int _userCount;
+    // 手填代理（v1.2.0）：锁定后链路只用它，不自动优选、不静默降级
+    private string _manualProxy = "";
+    private bool _manualLocked;
     private static string? _activeMirror; // 当前活动条目为反代时记录其地址（缩略图改写用）
 
     /// <summary>缩略图走反代：当前活动条目为反代时改写 th./w. 子域 URL。</summary>
@@ -68,12 +71,26 @@ internal sealed class WallhavenClient : IDisposable
         _ => Current().Url
     };
 
-    /// <summary>当前在用层级：直连 / 反代 / 用户代理 / 公共池。</summary>
-    public string ActiveTier => Current().Kind switch
+    /// <summary>当前在用层级：直连 / 反代 / 用户代理 / 公共池 / 手填代理（锁定）。</summary>
+    public string ActiveTier
     {
-        EntryKind.Direct => "直连",
-        EntryKind.Mirror => "反代",
-        _ => _chainIdx < _userCount ? "用户代理" : "公共池"
+        get
+        {
+            if (_manualLocked && _manualProxy.Length > 0) return "手填代理";
+            return Current().Kind switch
+            {
+                EntryKind.Direct => "直连",
+                EntryKind.Mirror => "反代",
+                _ => _chainIdx < _userCount ? "用户代理" : "公共池"
+            };
+        }
+    }
+
+    /// <summary>当前生效的代理地址（直连时为空串），供设置页文本框显示/编辑。</summary>
+    public string ActiveProxyAddress => Current().Kind switch
+    {
+        EntryKind.Direct => "",
+        _ => Current().Url
     };
 
     private (EntryKind Kind, string Url, string? User, string? Pass) Current()
@@ -105,10 +122,79 @@ internal sealed class WallhavenClient : IDisposable
         RebuildChain();
     }
 
+    /// <summary>
+    /// 设置/清除「手填代理」并决定是否锁定。锁定后 RebuildChain 只生成该代理一条链路：
+    /// 不自动优选、不静默降级（用户手填即视为明确意图；失效时由 UI 提示，见 v1.2.0 方案 2.3）。
+    /// </summary>
+    public void SetManualProxy(string? url, bool locked)
+    {
+        _manualProxy = (url ?? "").Trim();
+        _manualLocked = locked && _manualProxy.Length > 0;
+        RebuildChain();
+    }
+
+    /// <summary>当前是否处于「手填代理锁定」状态（供 UI 显示与缩略图客户端同步）。</summary>
+    public bool ManualProxyLocked => _manualLocked;
+
+    /// <summary>
+    /// 实测当前活动链路的延迟（毫秒）：连测 2 次取较小值，用于抗偶发尖峰
+    /// （实测反代中位 840ms 但出现过 11.8s 尖峰，单次测量不可作判据）。
+    /// 返回 null = 不可达。每次请求独立 5s 超时。
+    /// </summary>
+    public async Task<int?> MeasureActiveLatencyAsync(CancellationToken ct = default)
+    {
+        int? best = null;
+        for (int i = 0; i < 2; i++)
+        {
+            try
+            {
+                using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                cts.CancelAfter(TimeSpan.FromSeconds(5));
+                var e = Current();
+                var target = e.Kind == EntryKind.Mirror
+                    ? e.Url.TrimEnd('/') + "/api/v1/search?q=cat&purity=100&page=1"
+                    : "https://wallhaven.cc/api/v1/search?q=cat&purity=100&page=1";
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                using var resp = await _http.GetAsync(target, cts.Token);
+                sw.Stop();
+                if (resp.IsSuccessStatusCode)
+                {
+                    var ms = (int)sw.ElapsedMilliseconds;
+                    best = best == null ? ms : Math.Min(best.Value, ms);
+                }
+            }
+            catch { /* 单次失败忽略，两次都失败则返回 null */ }
+        }
+        return best;
+    }
+
     /// <summary>重建统一链路：直连 → 反代 → 用户代理（行内嵌账密优先，其次全局账密）→ 公共池。</summary>
     private void RebuildChain()
     {
         _chain.Clear();
+
+        // 手填代理锁定模式：链路只有这一条，失败即失败（不降级、不优选）
+        if (_manualLocked && _manualProxy.Length > 0)
+        {
+            try
+            {
+                var (url, u, p) = ParseProxyCredentials(_manualProxy, null, null);
+                _chain.Add((EntryKind.Proxy, url, u ?? _poolUser, p ?? _poolPass));
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"manual proxy invalid '{_manualProxy}': {ex.Message}");
+                _chain.Add((EntryKind.Direct, "", null, null));
+            }
+            _userCount = _chain.Count;
+            if (_chainIdx >= _chain.Count) _chainIdx = 0;
+            var oldM = _http;
+            _http = BuildClient();
+            Logger.Info($"request chain rebuilt: manual locked = {_manualProxy}; active = {ActiveProxyName}");
+            try { oldM.Dispose(); } catch { }
+            return;
+        }
+
         _chain.Add((EntryKind.Direct, "", null, null)); // 直连最优先（按用户要求）
         foreach (var m in _mirrorRaw)
             _chain.Add((EntryKind.Mirror, m, null, null));

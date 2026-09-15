@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text.RegularExpressions;
 using System.Collections.Concurrent;
+using System.Net.Sockets;
 
 namespace PonyoWallpaper;
 
@@ -58,9 +59,18 @@ internal static partial class ProxyTester
     }
 
     /// <summary>抓取全部源地址（http/https/socks5 不限），去重合并出 scheme://host:port 候选，随机打乱。</summary>
+    /// <summary>兼容原签名：只返回候选列表。</summary>
     public static async Task<List<string>> FetchSourcesAsync(IEnumerable<string> sources, Action<string>? log = null)
+        => (await FetchSourcesWithReportAsync(sources, log)).Candidates;
+
+    /// <summary>
+    /// 抓取代理源，并回报每个源的结果（是否成功、新增条数），供上层做失败记账与剔除（v1.2.0 需求 5）。
+    /// </summary>
+    public static async Task<(List<string> Candidates, List<(string Url, bool Ok, int Added)> Results)>
+        FetchSourcesWithReportAsync(IEnumerable<string> sources, Action<string>? log = null)
     {
         var set = new HashSet<string>();
+        var report = new List<(string Url, bool Ok, int Added)>();
         using var http = new HttpClient(new HttpClientHandler { UseProxy = false })
         {
             Timeout = TimeSpan.FromSeconds(20)
@@ -79,21 +89,21 @@ internal static partial class ProxyTester
                 {
                     var l = line.Trim();
                     if (!HostPortLine().IsMatch(l)) continue;
-                    if (proto == "https")
-                        set.Add($"https://{l}");
-                    else if (proto == "socks5")
-                        set.Add($"socks5://{l}");
-                    else
-                        set.Add($"http://{l}");
+                    if (proto == "https") set.Add($"https://{l}");
+                    else if (proto == "socks5") set.Add($"socks5://{l}");
+                    else set.Add($"http://{l}");
                 }
-                log?.Invoke($"源[{proto}] 新增 {set.Count - before} 条");
+                var added = set.Count - before;
+                report.Add((url, true, added));
+                log?.Invoke($"源[{proto}] 新增 {added} 条");
             }
             catch (Exception ex)
             {
+                report.Add((url, false, 0));
                 log?.Invoke($"源失败[{proto}] {url}: {ex.Message}");
             }
         }
-        return set.OrderBy(_ => Random.Shared.Next()).ToList();
+        return (set.OrderBy(_ => Random.Shared.Next()).ToList(), report);
     }
 
     /// <summary>并行竞速实测：返回可用代理按延迟升序（完整 url, 毫秒）。</summary>
@@ -108,6 +118,65 @@ internal static partial class ProxyTester
             if (l.Length > 0) result.Add(l);
         }
         return result;
+    }
+
+    /// <summary>
+    /// TCP 连通性快筛：仅建立 Socket 连接，不建 TLS、不发 HTTP。
+    /// 免费代理绝大多数是死端口，这一步可用极低成本淘汰 90% 以上候选
+    /// （单条约 0.3KB，对比完整 HTTPS 约 20KB，见方案 2.5.1）。
+    /// </summary>
+    public static async Task<List<string>> ProbeTcpAsync(
+        IEnumerable<string> urls, int maxConcurrency, int timeoutMs, Action<string>? log = null,
+        CancellationToken ct = default)
+    {
+        var results = new ConcurrentBag<string>();
+        var list = urls.Distinct().ToList();
+        using var gate = new SemaphoreSlim(Math.Max(1, maxConcurrency));
+        var tasks = list.Select(async url =>
+        {
+            try
+            {
+                await gate.WaitAsync(ct);
+                try
+                {
+                    if (!TryParseHostPort(url, out var host, out var port)) return;
+                    using var client = new TcpClient();
+                    var connect = client.ConnectAsync(host, port);
+                    var timeout = Task.Delay(timeoutMs, ct);
+                    var finished = await Task.WhenAny(connect, timeout);
+                    if (finished == timeout) return;   // 超时 = 不可达
+                    await connect;                      // 抛出真实异常同样视为不可达
+                    if (client.Connected) results.Add(url);
+                }
+                finally { gate.Release(); }
+            }
+            catch (OperationCanceledException) { }
+            catch { /* 单条失败不影响整体 */ }
+        }).ToList();
+        await Task.WhenAll(tasks);
+        var r = results.ToList();
+        log?.Invoke($"TCP 快筛：{list.Count} → 存活 {r.Count}");
+        return r;
+    }
+
+    /// <summary>从代理 URL 解析 host/port（支持 scheme://、user:pass@ 前缀）。</summary>
+    private static bool TryParseHostPort(string url, out string host, out int port)
+    {
+        host = ""; port = 0;
+        try
+        {
+            var s = url.Trim();
+            var i = s.IndexOf("://", StringComparison.Ordinal);
+            if (i >= 0) s = s[(i + 3)..];
+            var at = s.LastIndexOf('@');
+            if (at >= 0) s = s[(at + 1)..];
+            var colon = s.LastIndexOf(':');
+            if (colon < 0) return false;
+            host = s[..colon];
+            if (!int.TryParse(s[(colon + 1)..], out port)) return false;
+            return host.Length > 0 && port > 0;
+        }
+        catch { return false; }
     }
 
     public static async Task<List<(string Url, int Ms)>> ProbeAsync(
@@ -129,7 +198,7 @@ internal static partial class ProxyTester
                     if (handler == null) return;
                     using var c = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(timeoutSec) };
                     c.DefaultRequestHeaders.Add("User-Agent", "PonyoWallpaper/1.0");
-                    using var resp = await c.GetAsync(ProbeUrl, ct);
+                    using var resp = await c.GetAsync(ProbeUrl, HttpCompletionOption.ResponseHeadersRead, ct);
                     sw.Stop();
                     if (resp.IsSuccessStatusCode)
                     {
@@ -191,7 +260,7 @@ internal static partial class ProxyTester
                     {
                         c.DefaultRequestHeaders.Add("User-Agent", "PonyoWallpaper/1.0");
                         var sw = Stopwatch.StartNew();
-                        using var resp = await c.GetAsync(target, ct);
+                        using var resp = await c.GetAsync(target, HttpCompletionOption.ResponseHeadersRead, ct);
                         sw.Stop();
                         if (resp.IsSuccessStatusCode)
                         {
@@ -227,29 +296,83 @@ internal static partial class ProxyTester
             return cfg.PublicProxyUrls!;
         }
 
+        // —— 扫描模式（v1.2.0 需求 5 / 方案 2.5.2）——
+        // off=不扫描；quiet=默认（16 并发、抽样 50，企业网络友好）；normal=64；aggressive=128 全量
+        var mode = (cfg.ProxyScanMode ?? "quiet").ToLowerInvariant();
+        var (tcpConc, httpConc, sample, verifyCap) = mode switch
+        {
+            "aggressive" => (128, 96, 0, 120),   // 0 = 不抽样
+            "normal" => (64, 64, 200, 80),
+            _ => (16, 16, 50, 30),               // quiet（默认）
+        };
+        if (mode == "off" && !force)
+        {
+            log?.Invoke("代理扫描模式为 off，跳过（如需启用请到设置里改为 quiet/normal）");
+            return cfg.PublicProxyUrls ?? new List<string>();
+        }
+        log?.Invoke($"扫描模式：{mode}（TCP {tcpConc} 并发 / 抽样 {sample}）");
+
         var sources = cfg.ProxySourceUrls is { Count: > 0 } ? cfg.ProxySourceUrls : DefaultSourceUrls.ToList();
         log?.Invoke("抓取公共代理源…");
-        var candidates = await FetchSourcesAsync(sources, log);
-        if (candidates.Count == 0)
+        var (candidates0, srcReport) = await FetchSourcesWithReportAsync(sources, log);
+
+        // 源失败记账：成功清零、连续失败 3 次剔除（v1.2.0 决策 6）
+        var fails = cfg.ProxySourceFails ?? new Dictionary<string, int>();
+        foreach (var (url, ok, _) in srcReport)
+            fails[url] = ok ? 0 : (fails.TryGetValue(url, out var n) ? n : 0) + 1;
+        var dropped = fails.Where(kv => kv.Value >= 3).Select(kv => kv.Key).ToList();
+        if (dropped.Count > 0)
+        {
+            var keptSources = sources.Where(s => !dropped.Contains(SourceUrl(s))).ToList();
+            if (keptSources.Count > 0) cfg.ProxySourceUrls = keptSources;
+            foreach (var d in dropped)
+            {
+                fails.Remove(d);
+                log?.Invoke($"剔除失效源（连续失败 3 次）：{d}");
+            }
+        }
+        cfg.ProxySourceFails = fails;
+
+        if (candidates0.Count == 0)
         {
             log?.Invoke("所有源均未取得代理");
+            cfg.Save();
             return cfg.PublicProxyUrls ?? new List<string>();
         }
-        // 两轮筛选：
-        // 第一轮——全量快筛（96 并发 × 8s）：免费代理绝大多数是死代理，快筛淘汰 95% 以上
-        log?.Invoke($"共 {candidates.Count} 条候选，第一轮全量快筛…");
-        var survivors = await ProbeAsync(candidates, 96, 8);
+
+        // 抽样（quiet/normal 控制连接基数，降低企业网络观感）
+        var candidates = sample > 0 ? candidates0.Take(sample).ToList() : candidates0;
+        // 历史优先：上次池内成功的代理置顶先测，复用率显著高于随机候选
+        var known = cfg.PublicProxyUrls ?? new List<string>();
+        candidates = candidates.OrderBy(c => known.Contains(c) ? 0 : 1).ToList();
+        if (sample > 0 && candidates0.Count > sample)
+            log?.Invoke($"候选 {candidates0.Count} 条，抽样 {candidates.Count} 条");
+
+        // ① TCP 连通快筛：仅建 Socket 连接（不建 TLS、不发 HTTP），低成本淘汰死端口
+        var alive = await ProbeTcpAsync(candidates, tcpConc, 800, log);
+        if (alive.Count == 0)
+        {
+            log?.Invoke("TCP 快筛后无存活代理，稍后可重试或更换源地址");
+            cfg.Save();
+            return cfg.PublicProxyUrls ?? new List<string>();
+        }
+
+        // ② HTTP 验证：只取响应头（不下载 body），按模式限制验证条数
+        var verify = alive.Take(verifyCap).ToList();
+        var survivors = await ProbeAsync(verify, httpConc, 8, log);
         if (survivors.Count == 0)
         {
-            log?.Invoke("全量实测后无可用代理，稍后可重试或更换源地址");
+            log?.Invoke("HTTP 验证后无可用代理");
+            cfg.Save();
             return cfg.PublicProxyUrls ?? new List<string>();
         }
-        log?.Invoke($"第一轮存活 {survivors.Count} 个，第二轮复验（12 并发 × 12s，精确延迟）…");
-        // 第二轮——存活者复验：低并发长超时，剔除高并发下的误判，得到精确延迟
+        log?.Invoke($"存活 {survivors.Count} 个，延迟复验（12 并发 × 12s）…");
+
+        // ③ 精确复测存活者（低并发长超时），得到可比较的延迟
         var best = await ProbeAsync(survivors.Take(40).Select(b => b.Url), 12, 12, log);
         if (best.Count == 0)
         {
-            // 复验全挂说明第一轮结果已过期（免费代理秒级死亡），直接用第一轮结果
+            // 复验全挂说明结果已过期（免费代理秒级死亡），回退用上一步结果
             best = survivors;
         }
         var keep = best.Take(5).Select(b => b.Url).ToList();

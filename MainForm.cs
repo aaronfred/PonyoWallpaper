@@ -29,6 +29,16 @@ internal sealed class MainForm : Form
     // 底部设置条控件
     private readonly NumericUpDown _numInterval = new();
     private readonly ComboBox _cboResolution = new();
+
+    /// <summary>
+    /// 分辨率档位表（v1.2.0：3 档 → 6 档）。wallhaven 各档实测可用量见 docs/v1.2.0-优化方案.md 2.1
+    /// （1080p 278k / 2K 113k / 4K 59k / 5K 17k / 8K 3.7k / 10K 258）。
+    /// </summary>
+    private static readonly (string Label, string Value)[] ResTiers =
+    {
+        ("1080p", "1920x1080"), ("2K", "2560x1440"), ("4K", "3840x2160"),
+        ("5K", "5120x2880"), ("8K", "7680x4320"), ("10K", "10240x4320"),
+    };
     private readonly ComboBox _cboFill = new();
     private readonly ComboBox _cboSorting = new();
     private readonly ComboBox _cboMonitors = new();
@@ -96,7 +106,21 @@ internal sealed class MainForm : Form
     public void RebuildThumbProxy()
     {
         HttpMessageHandler handler;
-        if (_api.ActiveTier is "直连" or "反代")
+        if (_api.ManualProxyLocked && !string.IsNullOrWhiteSpace(_cfg.ManualProxy))
+        {
+            // 手填代理锁定：缩略图必须走同一条代理，否则 API 能通但图加载不出来
+            try
+            {
+                handler = ProxyFactory.Create(_cfg.ManualProxy, _cfg.ProxyUser, _cfg.ProxyPassword)
+                          ?? new HttpClientHandler();
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"manual proxy invalid for thumbs, fallback to direct: {ex.Message}");
+                handler = new HttpClientHandler();
+            }
+        }
+        else if (_api.ActiveTier is "直连" or "反代")
         {
             handler = new HttpClientHandler();
         }
@@ -315,14 +339,13 @@ internal sealed class MainForm : Form
         _cboResolution.Width = 72;
         _cboResolution.Margin = new Padding(0, 3, 8, 0);
         _cboResolution.Font = new Font("Microsoft YaHei UI", 9);
-        _cboResolution.Items.AddRange(new object[] { "1080p", "2K", "4K" });
-        _cboResolution.SelectedIndex = _cfg.Resolution switch { "1920x1080" => 0, "3840x2160" => 2, _ => 1 };
+        _cboResolution.Items.AddRange(ResTiers.Select(t => (object)t.Label).ToArray());
+        var resIdx = Array.FindIndex(ResTiers, t => t.Value == _cfg.Resolution);
+        _cboResolution.SelectedIndex = resIdx >= 0 ? resIdx : 1; // 未知值回落 2K
         _cboResolution.SelectedIndexChanged += (_, _) =>
         {
-            _cfg.Resolution = _cboResolution.SelectedIndex switch
-            {
-                0 => "1920x1080", 2 => "3840x2160", _ => "2560x1440"
-            };
+            var i = Math.Clamp(_cboResolution.SelectedIndex, 0, ResTiers.Length - 1);
+            _cfg.Resolution = ResTiers[i].Value;
             _cfg.Save();
             if (!_favMode) Reload();
         };
@@ -441,6 +464,9 @@ internal sealed class MainForm : Form
             var chs = keys.Select(Channels.Find).Where(c => c != null).Cast<ChannelDef>().ToList();
             // 父级为三态指示：全选✓ / 部分■ / 未选空；点击展开子频道列表
             var parent = new ToolStripMenuItem(title);
+            // 子菜单顶部的「全选」项：勾选=选满本类，取消勾选=清空本类
+            var selAll = new ToolStripMenuItem("全选") { CheckOnClick = true };
+            selAll.Checked = chs.Count > 0 && chs.All(c => _cfg.RotationChannels?.Contains(c.Key) == true);
             foreach (var ch in chs)
             {
                 var item = new ToolStripMenuItem(ch.Name)
@@ -452,10 +478,35 @@ internal sealed class MainForm : Form
                 item.CheckedChanged += (_, _) =>
                 {
                     UpdateRotationChannel(ch.Key, item.Checked);
+                    SyncSelectAll(selAll, parent, chs);
                     SetParentCheckState(parent, chs);
                 };
                 parent.DropDownItems.Add(item);
             }
+
+            // 「全选」：勾选=选满本类，取消勾选=清空本类（v1.2.0 需求 2，取代单独的「清除」按钮）
+            selAll.CheckedChanged += (_, _) =>
+            {
+                _buildingRotationMenu++;
+                bool changed = false;
+                foreach (ToolStripItem sub in parent.DropDownItems)
+                {
+                    // 只动带 Tag 的频道项（全选项自身与分隔线无 Tag）
+                    if (sub is ToolStripMenuItem mi && mi.Tag is string && mi.Checked != selAll.Checked)
+                    {
+                        mi.Checked = selAll.Checked;   // 触发各自的 CheckedChanged 完成写入
+                        changed = true;
+                    }
+                }
+                _buildingRotationMenu--;
+                if (!changed) return;   // 反向同步（子项变化引起）无需额外动作，避免递归与重复换壁纸
+                SetParentCheckState(parent, chs);
+                UpdateRotScopeText();
+                _ = _engine.NextAsync();  // 与单条勾选行为一致：整批改完后再换一张
+            };
+            // 「全选」置顶 + 分隔线（此处分隔线有语义：区分操作项与具体频道）
+            parent.DropDownItems.Insert(0, selAll);
+            parent.DropDownItems.Insert(1, new ToolStripSeparator());
             SetParentCheckState(parent, chs);
             // 子级级联菜单同样拦截"点击即关闭"，保证可连续勾选
             parent.DropDown.Closing += MenuClosingHandler;
@@ -476,12 +527,8 @@ internal sealed class MainForm : Form
             dd.Items.Add(nsfw);
         }
 
-        dd.Items.Add(new ToolStripSeparator());
-        var done = new ToolStripMenuItem("完成（已自动保存）");
-        done.Click += (_, _) => dd.Close();
-        dd.Items.Add(done);
-
-        // 勾选（ItemClicked）时不关闭菜单；点「完成」、菜单外区域或 Esc 自动保存并关闭
+        // v1.2.0：去掉底部多余的分隔线与「完成（已自动保存）」项
+        // —— 关闭即保存已由 MenuClosingHandler 处理（点菜单外区域或 Esc 同样保存并关闭）
         dd.Closing += MenuClosingHandler;
 
         // 深色主题适配菜单
@@ -523,6 +570,20 @@ internal sealed class MainForm : Form
         parent.CheckState = selected == chs.Count ? CheckState.Checked
             : selected > 0 ? CheckState.Indeterminate
             : CheckState.Unchecked;
+    }
+
+    /// <summary>
+    /// 反向同步：子项逐个变化时，更新「全选」项自身的勾选状态（全选✓ / 否则空）。
+    /// 该方法只改 selAll.Checked，不直接改子项；若子项已全部一致则 Checked 不变、
+    /// 不触发 selAll.CheckedChanged，从而避免与全选逻辑递归。
+    /// </summary>
+    private static void SyncSelectAll(ToolStripMenuItem selAll, ToolStripMenuItem parent, List<ChannelDef> chs)
+    {
+        if (chs.Count == 0) return;
+        var all = chs.All(c => parent.DropDownItems
+            .Cast<ToolStripItem>()
+            .Any(i => i is ToolStripMenuItem mi && (string?)mi.Tag == c.Key && mi.Checked));
+        if (selAll.Checked != all) selAll.Checked = all;
     }
 
     private void UpdateRotationChannel(string key, bool onSelect)
@@ -941,6 +1002,7 @@ internal sealed class MainForm : Form
             if (WallpaperSetter.Set(fullPath, _cfg.FillMode))
             {
                 _cache.Touch(item.Id);
+                _engine.SetCurrent(item);   // 同步「当前壁纸」，供状态栏右键收藏
                 var chName = _favMode ? "收藏"
                     : _nsfwMode ? "NSFW"
                     : Channels.Find(_currentChannelKey)?.Name ?? "";
@@ -1007,6 +1069,45 @@ internal sealed class MainForm : Form
 
     public void InvokeSetStatus(string text) => Invoke(() => _status.Text = text);
 
+    /// <summary>
+    /// 「当前壁纸」= 桌面上正在使用的那张。优先取本次运行的轮换记录（`_engine.Current`，手动设为壁纸时也会同步）；
+    /// 若本次还没换过图，则回退到更换历史的最新一条——历史跨会话持久，覆盖「上次运行设过、本次还没换」的情况。
+    /// </summary>
+    private WallpaperItem? CurrentWallpaper()
+    {
+        var cur = _engine.Current;
+        if (cur != null && !string.IsNullOrEmpty(cur.Id)) return cur;
+        try
+        {
+            var last = _history.Load(1).FirstOrDefault();
+            if (last != null && !string.IsNullOrEmpty(last.Id))
+                return new WallpaperItem
+                {
+                    Id = last.Id, Resolution = last.Resolution,
+                    PageUrl = last.PageUrl, FileSize = last.FileSize
+                };
+        }
+        catch (Exception ex) { Logger.Warn($"read history for current wallpaper: {ex.Message}"); }
+        return null;
+    }
+
+    /// <summary>
+    /// 收藏「当前壁纸」（托盘右键菜单调用）。只做收藏、不做取消，已收藏则原样返回提示。
+    /// 返回结果文案，由调用方决定展示方式（托盘气泡 / 状态栏）。
+    /// </summary>
+    public string FavoriteCurrentWallpaper()
+    {
+        var it = CurrentWallpaper();
+        if (it == null) return "暂无当前壁纸可收藏";
+
+        if (_favorites.Contains(it.Id)) return $"已在收藏夹：{it.Id}";
+
+        _favorites.Add(it);
+        // 瀑布流里若正好有这张，同步心形状态
+        foreach (var c in _flow.Cards)
+            if (c.Item.Id == it.Id) c.MarkFavorited();
+        return $"已收藏当前壁纸：{it.Id} · 共 {_favorites.All().Count} 张";
+    }
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
         if (e.CloseReason == CloseReason.UserClosing)

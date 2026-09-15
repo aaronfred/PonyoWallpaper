@@ -200,15 +200,56 @@ internal sealed class ProxyManagerForm : Form
     {
         try
         {
-            var path = Path.Combine(AppContext.BaseDirectory, "反代搭建指引.txt");
-            if (!File.Exists(path))
+            // 依次尝试三个位置：exe 同目录 → docs 子目录（发布包里的实际位置）→ 内嵌资源释放
+            // （此前只找 exe 同目录，而发布包把 txt 放在 docs/ 下，导致点击没有反应）
+            var candidates = new[]
             {
-                AppendLog("未找到指引文件 反代搭建指引.txt（随发布包附带）");
+                Path.Combine(AppContext.BaseDirectory, "反代搭建指引.txt"),
+                Path.Combine(AppContext.BaseDirectory, "docs", "反代搭建指引.txt"),
+            };
+            var path = candidates.FirstOrDefault(File.Exists);
+            if (path != null)
+            {
+                Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
+                AppendLog("已打开反代搭建指引");
                 return;
             }
+            // 外部 txt 都不在 → 从内嵌资源释放到 exe 同目录（不可写则退到临时目录），再弹出文本文件
+            var text = ReadEmbeddedGuide();
+            if (text.Length == 0)
+            {
+                AppendLog("未找到指引：外部 反代搭建指引.txt 与内嵌资源均不可用");
+                return;
+            }
+            path = candidates[0];
+            try
+            {
+                File.WriteAllText(path, text, System.Text.Encoding.UTF8);
+            }
+            catch
+            {
+                // exe 目录可能不可写（如装在 Program Files）→ 释放到临时目录
+                path = Path.Combine(Path.GetTempPath(), "反代搭建指引.txt");
+                File.WriteAllText(path, text, System.Text.Encoding.UTF8);
+            }
             Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
+            AppendLog("已从内嵌资源释放并打开：反代搭建指引.txt");
         }
         catch (Exception ex) { AppendLog("打开指引失败：" + ex.Message); }
+    }
+
+    /// <summary>读取内嵌的反代搭建指引（csproj 里 LogicalName = ponyo-mirror-guide.txt）。</summary>
+    private static string ReadEmbeddedGuide()
+    {
+        try
+        {
+            var asm = System.Reflection.Assembly.GetExecutingAssembly();
+            using var s = asm.GetManifestResourceStream("ponyo-mirror-guide.txt");
+            if (s == null) return "";
+            using var r = new StreamReader(s, System.Text.Encoding.UTF8);
+            return r.ReadToEnd();
+        }
+        catch { return ""; }
     }
 
     private void UpdatePublicMeta()
