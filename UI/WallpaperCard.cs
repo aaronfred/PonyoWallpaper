@@ -8,6 +8,7 @@ internal sealed class WallpaperCard : Panel
 {
     public WallpaperItem Item { get; }
     private readonly PictureBox _pic;
+    private readonly Label _srcBadge;   // v1.4.0 左上角来源角标
     private readonly Panel _overlay;
     private readonly Button _btnFav;
     private readonly Button _btnSet;
@@ -99,8 +100,26 @@ internal sealed class WallpaperCard : Panel
         ctx.Items.Add("屏蔽此图，不再出现", null, (_, _) => OnBlock?.Invoke(Item));
         ContextMenuStrip = ctx;
 
+        // v1.4.0 来源角标：多源混合时用于区分图片来自哪个源
+        _srcBadge = new Label
+        {
+            Text = Item.SourceLabel,
+            AutoSize = false,
+            Size = new Size(46, 18),
+            Location = new Point(6, 6),
+            TextAlign = ContentAlignment.MiddleCenter,
+            Font = new Font("Microsoft YaHei UI", 7.5f),
+            ForeColor = Color.White,
+            BackColor = Color.FromArgb(150, 0, 0, 0),
+            Visible = true
+        };
+        _srcBadge.BringToFront();
+
         Controls.Add(_pic);
         Controls.Add(_overlay);
+        Controls.Add(_srcBadge);
+        // 必须在 Add 之后再次置顶：后添加的控件会盖住先 BringToFront 的
+        _srcBadge.BringToFront();
     }
 
     private static Button MakeOverlayButton(string text, int width)

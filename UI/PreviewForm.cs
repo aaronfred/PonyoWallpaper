@@ -147,7 +147,7 @@ internal sealed class PreviewForm : Form
         var ct = _cts.Token;
         try
         {
-            var fullPath = _cache.FullPath(item.Id);
+            var fullPath = _cache.FullPath(item.StoreId);
             if (!File.Exists(fullPath))
             {
                 try { await _api.DownloadAsync(item.Path, fullPath, ct); }
@@ -201,7 +201,7 @@ internal sealed class PreviewForm : Form
 
     private void UpdateFavButton(WallpaperItem item)
     {
-        _btnFav.Text = _favorites.Contains(item.Id) ? "已收藏" : "收藏";
+        _btnFav.Text = _favorites.Contains(item.StoreId) ? "已收藏" : "收藏";
     }
 
     private void Cleanup()

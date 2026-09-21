@@ -897,11 +897,14 @@ internal sealed class MainForm : Form
         if (shuffle) all = all.OrderBy(_ => Random.Shared.Next()).ToList();
         foreach (var rec in all)
         {
+            // v1.4.0：收藏记录自带源标识与直链。旧记录（无 SourceKey/Path）按 wallhaven 规则回退。
+            var (src, rawId) = SplitStoreId(rec.Id, rec.SourceKey);
             AddCard(new WallpaperItem
             {
-                Id = rec.Id,
-                Path = FullUrlFor(rec.Id),
-                Thumb = ThumbUrlFor(rec.Id),
+                SourceKey = src,
+                Id = rawId,
+                Path = string.IsNullOrEmpty(rec.Path) ? FullUrlFor(rawId) : rec.Path,
+                Thumb = string.IsNullOrEmpty(rec.Thumb) ? ThumbUrlFor(rawId) : rec.Thumb,
                 Resolution = rec.Resolution,
                 PageUrl = rec.PageUrl
             });
@@ -911,12 +914,28 @@ internal sealed class MainForm : Form
             : $"收藏 {all.Count} 张 · 双击卡片设为壁纸" + (shuffle ? "（已换一批）" : "");
     }
 
+    /// <summary>
+    /// 把收藏落盘键拆回 (源, 原始 id)。落盘键规则见 <see cref="WallpaperItem.StoreId"/>：
+    /// wallhaven 是裸 id，其余源为 "源_原始id"。
+    /// </summary>
+    private static (string Source, string RawId) SplitStoreId(string storeId, string? sourceKey)
+    {
+        var src = string.IsNullOrWhiteSpace(sourceKey) ? "wallhaven" : sourceKey;
+        if (src == "wallhaven") return ("wallhaven", storeId);
+        var prefix = src + "_";
+        return storeId.StartsWith(prefix, StringComparison.Ordinal)
+            ? (src, storeId[prefix.Length..])
+            : (src, storeId);
+    }
+
     /// <summary>wallhaven 缩略图直链（lg 档，无需 API）。</summary>
-    private static string ThumbUrlFor(string id) => $"https://th.wallhaven.cc/lg/{id[..2]}/{id}.jpg";
+    private static string ThumbUrlFor(string id) =>
+        id.Length >= 2 ? $"https://th.wallhaven.cc/lg/{id[..2]}/{id}.jpg" : "";
 
     /// <summary>wallhaven 原图直链（默认 jpg，下载失败时回退 png）。
     /// 注意文件名带 wallhaven- 前缀（此前缺前缀导致收藏重建 404）。</summary>
-    private static string FullUrlFor(string id) => $"https://w.wallhaven.cc/full/{id[..2]}/wallhaven-{id}.jpg";
+    private static string FullUrlFor(string id) =>
+        id.Length >= 2 ? $"https://w.wallhaven.cc/full/{id[..2]}/wallhaven-{id}.jpg" : "";
 
     private async Task LoadPageAsync()
     {
@@ -1005,7 +1024,7 @@ internal sealed class MainForm : Form
             foreach (var card in _flow.Cards) seen.Add(card.Item.Id);
             foreach (var item in list)
             {
-                if (_blacklist.Contains(item.Id) || seen.Contains(item.Id)) continue;
+                if (_blacklist.Contains(item.StoreId) || seen.Contains(item.StoreId)) continue;
                 AddCard(item);
                 added++;
             }
@@ -1045,7 +1064,7 @@ internal sealed class MainForm : Form
     private void AddCard(WallpaperItem item)
     {
         var card = new WallpaperCard(item);
-        if (_favorites.Contains(item.Id)) card.MarkFavorited();
+        if (_favorites.Contains(item.StoreId)) card.MarkFavorited();
         if (_favMode) card.SetRemovableFavorite();
 
         // 悬停 Tooltip + 单击/悬停状态栏展示基础信息
@@ -1059,7 +1078,7 @@ internal sealed class MainForm : Form
             if (_favMode)
             {
                 // 收藏视图：按钮 = 取消收藏
-                _favorites.Remove(it.Id);
+                _favorites.Remove(it.StoreId);
                 _flow.RemoveCard(card);
                 _status.Text = $"已取消收藏 · 剩余 {_favorites.All().Count} 张";
             }
@@ -1071,7 +1090,7 @@ internal sealed class MainForm : Form
         };
         card.OnBlock += it =>
         {
-            _blacklist.AddId(it.Id);
+            _blacklist.AddId(it.StoreId);
             _flow.RemoveCard(card);
         };
 
@@ -1093,20 +1112,20 @@ internal sealed class MainForm : Form
             it =>
             {
                 // 预览窗内的收藏开关与卡片行为一致
-                if (_favorites.Contains(it.Id)) _favorites.Remove(it.Id);
+                if (_favorites.Contains(it.StoreId)) _favorites.Remove(it.StoreId);
                 else _favorites.Add(it);
             });
         dlg.ShowDialog(this);
         // 关闭预览后同步当前瀑布流的收藏状态显示
         foreach (var c in _flow.Cards)
         {
-            if (_favorites.Contains(c.Item.Id)) c.MarkFavorited();
+            if (_favorites.Contains(c.Item.StoreId)) c.MarkFavorited();
         }
     }
 
     private async Task SetAsWallpaperAsync(WallpaperItem item)
     {
-        var fullPath = _cache.FullPath(item.Id);
+        var fullPath = _cache.FullPath(item.StoreId);
         try
         {
             if (!File.Exists(fullPath))
@@ -1125,7 +1144,7 @@ internal sealed class MainForm : Form
             }
             if (WallpaperSetter.Set(fullPath, _cfg.FillMode))
             {
-                _cache.Touch(item.Id);
+                _cache.Touch(item.StoreId);
                 _engine.SetCurrent(item);   // 同步「当前壁纸」，供状态栏右键收藏
                 var chName = _favMode ? "收藏"
                     : _nsfwMode ? "NSFW"
@@ -1146,7 +1165,7 @@ internal sealed class MainForm : Form
     {
         try
         {
-            var thumbPath = _cache.ThumbPath(card.Item.Id);
+            var thumbPath = _cache.ThumbPath(card.Item.StoreId);
             if (!File.Exists(thumbPath))
             {
                 var url = card.Item.Thumb;
@@ -1224,13 +1243,13 @@ internal sealed class MainForm : Form
         var it = CurrentWallpaper();
         if (it == null) return "暂无当前壁纸可收藏";
 
-        if (_favorites.Contains(it.Id)) return $"已在收藏夹：{it.Id}";
+        if (_favorites.Contains(it.StoreId)) return $"已在收藏夹：{it.Id}（{it.SourceLabel}）";
 
         _favorites.Add(it);
         // 瀑布流里若正好有这张，同步心形状态
         foreach (var c in _flow.Cards)
             if (c.Item.Id == it.Id) c.MarkFavorited();
-        return $"已收藏当前壁纸：{it.Id} · 共 {_favorites.All().Count} 张";
+        return $"已收藏当前壁纸：{it.Id}（{it.SourceLabel}） · 共 {_favorites.All().Count} 张";
     }
     protected override void OnFormClosing(FormClosingEventArgs e)
     {

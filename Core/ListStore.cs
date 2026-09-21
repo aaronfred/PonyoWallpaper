@@ -4,10 +4,26 @@ namespace PonyoWallpaper;
 
 internal sealed class FavRecord
 {
+    /// <summary>
+    /// 落盘键。v1.4.0 起为复合键（"源_原始id"，wallhaven 保持裸 id 以兼容旧数据），
+    /// 因为不同壁纸源的 id 会相撞。
+    /// </summary>
     public string Id { get; set; } = "";
+
+    /// <summary>来源标识（仅新增记录有；旧记录为空，按 wallhaven 处理）。</summary>
+    public string SourceKey { get; set; } = "wallhaven";
+
     public DateTime AddedAt { get; set; }
     public string Resolution { get; set; } = "";
     public string PageUrl { get; set; } = "";
+
+    /// <summary>
+    /// 原图 / 缩略图直链。v1.4.0 起随收藏一起存 —— 多源后无法再从 id 反推 URL
+    /// （wallhaven 有固定规则，Bing / 360 / Unsplash 各不相同），必须原样记录。
+    /// 旧记录为空，回退到 wallhaven 规则。
+    /// </summary>
+    public string Path { get; set; } = "";
+    public string Thumb { get; set; } = "";
 }
 
 /// <summary>
@@ -54,10 +70,20 @@ internal sealed class ListStore
 
     public void Add(WallpaperItem item)
     {
+        var key = item.StoreId;   // 复合键：不同源的 id 会撞，必须带上源前缀
         lock (_lock)
         {
-            if (_items.Any(x => x.Id == item.Id)) return;
-            _items.Add(new FavRecord { Id = item.Id, AddedAt = DateTime.Now, Resolution = item.Resolution, PageUrl = item.PageUrl });
+            if (_items.Any(x => x.Id == key)) return;
+            _items.Add(new FavRecord
+            {
+                Id = key,
+                AddedAt = DateTime.Now,
+                Resolution = item.Resolution,
+                PageUrl = item.PageUrl,
+                SourceKey = item.SourceKey,
+                Path = item.Path,
+                Thumb = item.Thumb
+            });
             Save();
         }
     }

@@ -32,6 +32,13 @@ internal sealed class WallpaperItem
             _           => SourceKey
         };
 
-    /// <summary>复合主键：收藏与缓存都用它，避免跨源 id 冲突。</summary>
+    /// <summary>复合主键（含冒号，仅用于内部比较/日志，不要做文件名）。</summary>
     public string CompositeId => $"{SourceKey}:{Id}";
+
+    /// <summary>
+    /// 落盘键：收藏记录与缓存文件名都用它，避免跨源 id 冲突。
+    /// wallhaven 保持裸 Id（与旧版本兼容，已有缓存不会失效）；其余源加源前缀。
+    /// 不含冒号，可安全用作 Windows 文件名。
+    /// </summary>
+    public string StoreId => SourceKey == "wallhaven" ? Id : $"{SourceKey}_{Id}";
 }
