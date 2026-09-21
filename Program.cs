@@ -152,12 +152,11 @@ internal static class Program
             var blacklist = new ListStore(AppPaths.BlacklistFile);
 
             // v1.2.0：代理扫描默认 Quiet（不自动外连大量代理节点，避免企业网络告警），仅手动触发。
-            // 唯一例外：完全没有任何可用链路（无反代、无手填、无历史公共池）时自动跑一次，保证开箱可用。
+            // 唯一例外：完全没有任何可用链路时自动跑一次，保证开箱可用。
+            // v1.3.0：内置默认反代（隐藏）始终存在 → 开箱即有链路，该例外实际不再触发。
             // 模式见 docs/v1.2.0-优化方案.md 2.5.2：off / quiet(默认) / normal / aggressive
             var scanMode = (cfg.ProxyScanMode ?? "quiet").ToLowerInvariant();
-            var hasAnyLink = (cfg.CfProxyUrls?.Count ?? 0) > 0
-                             || !string.IsNullOrWhiteSpace(cfg.ManualProxy)
-                             || (cfg.ProxyUrls?.Count ?? 0) > 0;
+            var hasAnyLink = true;   // 内置默认反代兜底：任何情况下都至少有一条可用链路
             var poolEmpty = (cfg.PublicProxyUrls?.Count ?? 0) == 0;
             var autoScan = scanMode is "normal" or "aggressive"
                            || (scanMode != "off" && !hasAnyLink && poolEmpty);

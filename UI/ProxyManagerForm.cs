@@ -121,7 +121,7 @@ internal sealed class ProxyManagerForm : Form
         {
             MakeLabel("需代理的网址（每行一个域名，后缀匹配；默认 wallhaven 三站点，可增删供其他程序集成）", 12, 14),
             _proxiedHosts,
-            MakeLabel("反代地址（可填多行按序尝试，直连可达、优先于一切代理；留空不使用。搭建见「反代搭建指引」）", 12, 104),
+            MakeLabel("反代地址（可填多行按序尝试，直连可达、优先于一切代理；留空 = 使用内置默认代理。搭建见「反代搭建指引」）", 12, 104),
             _cf,
             MakeLabel("用户代理池（每行一个，可含 user:pass@；优先级高于公共代理池）", 12, 194),
             _pool,
@@ -193,7 +193,9 @@ internal sealed class ProxyManagerForm : Form
         _cfg.CfProxyUrl = lines.Count > 0 ? lines[0] : "";
         _cfg.Save();
         _onPoolChanged();
-        AppendLog(lines.Count > 0 ? $"反代地址已保存（{lines.Count} 个，按序尝试）" : "反代地址已清空");
+        AppendLog(lines.Count > 0
+            ? $"反代地址已保存（{lines.Count} 个，按序尝试）"
+            : "反代地址已清空 → 改为使用内置默认代理");
     }
     /// <summary>打开随程序附带的反代搭建指引（release 目录下 反代搭建指引.txt）。</summary>
     private void OpenGuide()

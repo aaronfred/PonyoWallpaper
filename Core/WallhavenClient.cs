@@ -19,11 +19,12 @@ internal sealed class WallhavenClient : IDisposable
 
     // —— 统一请求链路（粘性轮换，按优先级排列）：直连 → 反代 → 用户代理 → 公共池 ——
     // 每个条目是一级；失败切换到下一级，成功后保持（回绕时从头重试，按用户要求直连最优先）。
-    private enum EntryKind { Direct, Mirror, Proxy }
+    private enum EntryKind { Direct, Mirror, DefaultMirror, Proxy }
     private readonly List<(EntryKind Kind, string Url, string? User, string? Pass)> _chain = new();
     private List<string> _userRaw = new();
     private List<string> _publicRaw = new();
     private List<string> _mirrorRaw = new();
+    private bool _usingDefaultMirror;   // 用户未填反代 → 链路用内置默认反代（隐藏地址）
     private string? _poolUser;
     private string? _poolPass;
     private int _chainIdx;
@@ -63,13 +64,25 @@ internal sealed class WallhavenClient : IDisposable
         return c;
     }
 
-    /// <summary>当前实际在用的链路描述（随失败切换/池重建实时变化）。</summary>
+    /// <summary>当前实际在用的链路描述（随失败切换/池重建实时变化）。默认反代不外泄地址，统一称「默认代理」。</summary>
     public string ActiveProxyName => Current().Kind switch
     {
         EntryKind.Direct => "直连",
+        EntryKind.DefaultMirror => "默认代理",
         EntryKind.Mirror => Current().Url + "（反代直连）",
         _ => Current().Url
     };
+
+    /// <summary>当前代理地址；直连与内置默认反代都返回空串（默认反代不对外暴露地址）。</summary>
+    public string ActiveProxyAddress => Current().Kind switch
+    {
+        EntryKind.Direct => "",
+        EntryKind.DefaultMirror => "",
+        _ => Current().Url
+    };
+
+    /// <summary>当前链路是否使用内置默认反代（设置页据此显示「当前使用默认代理」提示）。</summary>
+    public bool UsingDefaultMirror => Current().Kind == EntryKind.DefaultMirror;
 
     /// <summary>当前在用层级：直连 / 反代 / 用户代理 / 公共池 / 手填代理（锁定）。</summary>
     public string ActiveTier
@@ -80,27 +93,33 @@ internal sealed class WallhavenClient : IDisposable
             return Current().Kind switch
             {
                 EntryKind.Direct => "直连",
+                EntryKind.DefaultMirror => "默认代理",
                 EntryKind.Mirror => "反代",
                 _ => _chainIdx < _userCount ? "用户代理" : "公共池"
             };
         }
     }
 
-    /// <summary>当前生效的代理地址（直连时为空串），供设置页文本框显示/编辑。</summary>
-    public string ActiveProxyAddress => Current().Kind switch
-    {
-        EntryKind.Direct => "",
-        _ => Current().Url
-    };
-
     private (EntryKind Kind, string Url, string? User, string? Pass) Current()
         => _chain.Count == 0 ? (EntryKind.Direct, "", null, null) : _chain[Math.Clamp(_chainIdx, 0, _chain.Count - 1)];
 
-    /// <summary>设置反代地址（可多行，按序尝试；来自 代理管理 → 反代地址）。</summary>
+    /// <summary>
+    /// 该条目是否为「反代」（用户自填反代 或 内置默认反代）。
+    /// 新增反代类型时只需改这里一处 —— 曾经因为漏判 DefaultMirror 导致测速探针打到被墙的直连地址。
+    /// </summary>
+    private static bool IsMirror(in (EntryKind Kind, string Url, string? User, string? Pass) e)
+        => e.Kind is EntryKind.Mirror or EntryKind.DefaultMirror;
+
+    /// <summary>
+    /// 设置反代地址（可多行，按序尝试；来自 代理管理 → 反代地址）。
+    /// <b>留空 = 使用内置默认反代</b>（隐藏资源，见 <see cref="DefaultMirror"/>）；填了则只用用户自己的。
+    /// </summary>
     public void SetMirrors(IReadOnlyList<string>? urls)
     {
         _mirrorRaw = (urls ?? Array.Empty<string>())
             .Where(s => !string.IsNullOrWhiteSpace(s)).Select(s => s.Trim().TrimEnd('/')).ToList();
+        _usingDefaultMirror = _mirrorRaw.Count == 0;
+        if (_usingDefaultMirror) _mirrorRaw = new List<string> { DefaultMirror.Url };
         RebuildChain();
     }
 
@@ -151,7 +170,7 @@ internal sealed class WallhavenClient : IDisposable
                 using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 cts.CancelAfter(TimeSpan.FromSeconds(5));
                 var e = Current();
-                var target = e.Kind == EntryKind.Mirror
+                var target = IsMirror(e)
                     ? e.Url.TrimEnd('/') + "/api/v1/search?q=cat&purity=100&page=1"
                     : "https://wallhaven.cc/api/v1/search?q=cat&purity=100&page=1";
                 var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -197,7 +216,7 @@ internal sealed class WallhavenClient : IDisposable
 
         _chain.Add((EntryKind.Direct, "", null, null)); // 直连最优先（按用户要求）
         foreach (var m in _mirrorRaw)
-            _chain.Add((EntryKind.Mirror, m, null, null));
+            _chain.Add((DefaultMirror.IsDefault(m) ? EntryKind.DefaultMirror : EntryKind.Mirror, m, null, null));
         foreach (var line in _userRaw)
         {
             try
@@ -220,7 +239,8 @@ internal sealed class WallhavenClient : IDisposable
         if (_chainIdx >= _chain.Count) _chainIdx = 0;
         var old = _http;
         _http = BuildClient();
-        Logger.Info($"request chain rebuilt: direct + mirror {_mirrorRaw.Count} + user {_userRaw.Count} + public {_publicRaw.Count}; active = {ActiveProxyName}");
+        // 注意：不要打印 _mirrorRaw 内容——默认反代地址不外泄，只报是否在用默认
+        Logger.Info($"request chain rebuilt: direct + mirror {_mirrorRaw.Count}{( _usingDefaultMirror ? "(默认)" : "")} + user {_userRaw.Count} + public {_publicRaw.Count}; active = {ActiveProxyName}");
         try { old.Dispose(); } catch { }
     }
 
@@ -231,6 +251,7 @@ internal sealed class WallhavenClient : IDisposable
         var name = e.Kind switch
         {
             EntryKind.Direct => "(直连)",
+            EntryKind.DefaultMirror => "默认代理（反代直连）",
             EntryKind.Mirror => e.Url + "（反代直连）",
             _ => e.Url
         };
@@ -246,7 +267,7 @@ internal sealed class WallhavenClient : IDisposable
             Logger.Warn($"invalid proxy, fallback to direct: {ex.Message}");
             handler = new HttpClientHandler();
         }
-        _activeMirror = e.Kind == EntryKind.Mirror ? e.Url : null;
+        _activeMirror = IsMirror(e) ? e.Url : null;
         var c = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(30) };
         c.DefaultRequestHeaders.Add("User-Agent", "PonyoWallpaper/1.0");
         if (_apiKey.Length > 0)
@@ -276,6 +297,9 @@ internal sealed class WallhavenClient : IDisposable
         for (var i = 0; i < _chain.Count; i++)
         {
             var e = _chain[i];
+            // 内置默认反代不参与优选：它是全用户的兜底资源，不该被"竞速/切换"反复压测，
+            // 也不该被选出来当作最快链路（避免把公共资源当成用户的私有优选结果）。
+            if (e.Kind == EntryKind.DefaultMirror) continue;
             var kind = e.Kind switch
             {
                 EntryKind.Direct => "direct",
@@ -285,8 +309,20 @@ internal sealed class WallhavenClient : IDisposable
             entries.Add((i, kind, e.Url, e.User, e.Pass));
         }
 
+        // 用户没配任何自己的链路时，候选集为空 → 说明当前只能靠默认代理，直接保持不动
+        if (entries.Count == 0)
+        {
+            log?.Invoke("没有可优选的链路（当前使用默认代理）");
+            return null;
+        }
+
         var best = await ProxyTester.ProbeChainAsync(entries, 12, log);
-        if (best.Count == 0) return null;
+        if (best.Count == 0)
+        {
+            // 其他链路都不可用 → 保持现状（若正用默认代理则继续用它）
+            if (UsingDefaultMirror) log?.Invoke("其他链路均不可用，继续使用默认代理");
+            return null;
+        }
 
         _chainIdx = best[0].Idx;
         var old = _http;
@@ -306,9 +342,9 @@ internal sealed class WallhavenClient : IDisposable
             ? Array.Empty<string>() : new[] { proxyUrl }), proxyUser, proxyPassword);
     }
 
-    /// <summary>按当前链路条目改写 URL：反代条目 → 反代地址；其余原样。</summary>
+    /// <summary>按当前链路条目改写 URL：反代条目（含内置默认反代）→ 反代地址；其余原样。</summary>
     private string PrepareUrl(string raw)
-        => Current().Kind == EntryKind.Mirror ? RewriteWith(raw, Current().Url) : raw;
+        => IsMirror(Current()) ? RewriteWith(raw, Current().Url) : raw;
 
     /// <summary>
     /// 解析代理地址中内嵌的 user:pass@ 凭据（支持 URL 转义）。
@@ -405,7 +441,21 @@ internal sealed class WallhavenClient : IDisposable
                 using var resp = await http.GetAsync(url, ct);
                 if ((int)resp.StatusCode == 429)
                 {
-                    var wait = TimeSpan.FromSeconds(Math.Pow(2, attempt + 1));
+                    // 429 按「出口 IP」限流：换一条链路通常立刻可用（不同 IP 不同配额），
+                    // 死等同一个 IP 既慢又白烧配额 —— 实测共享反代 burst 后 retry-after=22s，
+                    // 而原来的 2/4/8s 退避会白等 14s+ 再失败。
+                    // 首次 429 先换链路；没有别的链路或换了还是 429，才按服务端 Retry-After 等一次（上限 20s）。
+                    if (_chain.Count > 1 && attempt == 0)
+                    {
+                        Logger.Warn("429 rate-limited, 切换链路重试");
+                        RotateProxy();
+                        await Task.Delay(400, ct);
+                        continue;
+                    }
+                    var ra = resp.Headers.RetryAfter?.Delta;
+                    var wait = ra is { TotalSeconds: > 0 and <= 20 }
+                        ? ra.Value
+                        : TimeSpan.FromSeconds(Math.Min(20, Math.Pow(2, attempt + 1)));
                     Logger.Warn($"429 rate-limited, retry in {wait.TotalSeconds:0.0}s");
                     await Task.Delay(wait, ct);
                     continue;

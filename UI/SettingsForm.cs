@@ -76,9 +76,10 @@ internal sealed class SettingsForm : Form
         var y = 16;
         y = PlaceRow(rows, y, "缓存配额（MB）", _cacheLimit);
 
-        // 当前代理（v1.2.0）：一个可编辑文本框 + 「优选代理」按钮 + 下方等宽状态条。
-        // 文本框显示当前生效的代理，也可直接手填（手填即锁定使用）；清空并失焦则回到自动链路。
-        // 「优选代理」= 自动功能：实测各条链路后自动切换到最快的一级，并把结果回填进文本框。
+        // 当前代理（v1.2.0 / v1.3.0）：两行，右列各一个按钮。
+        //   第一行：可编辑文本框（显示当前生效代理，也可直接手填）+「优选代理」
+        //   第二行：状态条（类型 + 延迟）+「恢复默认代理」
+        // 内置默认反代（隐藏）在用时，文本框只显示提示语、不暴露地址。
         var proxyPanel = new Panel { Width = 340, Height = 52 };
         _txtProxy.SetBounds(0, 0, 240, 26);   // 与上方「缓存配额」等宽，右缘对齐
         _txtProxy.Font = new Font("Microsoft YaHei UI", 9);
@@ -102,21 +103,35 @@ internal sealed class SettingsForm : Form
         btnPickBest.FlatAppearance.BorderColor = Color.FromArgb(200, 200, 200);
         btnPickBest.Click += async (_, _) => await PickBestProxyAsync(btnPickBest);
 
-        // 状态条：左缘与文本框齐，右缘延伸到「优选代理」按钮右缘（= 240 + 8 间隙 + 92）
-        _lblProxyInfo.SetBounds(0, 28, 340, 24);
+        // 状态条：与文本框等宽，显示代理类型与实测延迟；超阈值时追加提示
+        _lblProxyInfo.SetBounds(0, 28, 240, 24);
         _lblProxyInfo.AutoSize = false;
         _lblProxyInfo.TextAlign = ContentAlignment.MiddleLeft;
         _lblProxyInfo.Font = new Font("Microsoft YaHei UI", 8);
         _lblProxyInfo.ForeColor = Color.FromArgb(105, 105, 105);
         _lblProxyInfo.BackColor = Color.FromArgb(245, 245, 245);
 
+        // 恢复默认代理：清掉自定义反代与手填代理，回到内置默认代理
+        var btnRestoreDefault = new Button
+        {
+            Text = "恢复默认代理",
+            Bounds = new Rectangle(248, 28, 92, 24),
+            Font = new Font("Microsoft YaHei UI", 9),
+            FlatStyle = FlatStyle.Flat
+        };
+        btnRestoreDefault.FlatAppearance.BorderSize = 1;
+        btnRestoreDefault.FlatAppearance.BorderColor = Color.FromArgb(200, 200, 200);
+        btnRestoreDefault.Click += (_, _) => RestoreDefaultProxy();
+
         proxyPanel.Controls.Add(_txtProxy);
         proxyPanel.Controls.Add(btnPickBest);
         proxyPanel.Controls.Add(_lblProxyInfo);
+        proxyPanel.Controls.Add(btnRestoreDefault);
         y = PlaceRow(rows, y, "当前代理", proxyPanel, 52);
         proxyPanel.Size = new Size(340, 52);
-        _tips.SetToolTip(btnPickBest, "实测现有各条链路并自动切换到最快的一级，结果填入文本框");
+        _tips.SetToolTip(btnPickBest, "实测各条链路并自动切换到最快的一级（内置默认代理不参与优选）");
         _tips.SetToolTip(_txtProxy, "显示当前生效的代理；可直接手填（socks5:// 或 http://，可含 user:pass@）并自动锁定使用；清空则回到自动链路");
+        _tips.SetToolTip(btnRestoreDefault, "清除自定义反代与手填代理，回到内置默认代理（原配置将被覆盖）");
 
         y = PlaceRow(rows, y, "开机自启", _autostart);
         y = PlaceRow(rows, y, "启动最小化到托盘", _startMinimized);
@@ -467,10 +482,14 @@ internal sealed class SettingsForm : Form
     /// </summary>
     private void UpdateProxyUi()
     {
+        // 内置默认反代在用时，文本框留空只显示提示语 —— 不把地址摆到界面上（避免被抄走滥用）
+        _txtProxy.PlaceholderText = _api.UsingDefaultMirror
+            ? "当前使用默认代理 · 填自己的代理可覆盖"
+            : "留空=自动；可手填 socks5://127.0.0.1:7890";
         if (!_txtProxy.Focused)
         {
             _applyingProxy = true;
-            var addr = _api.ActiveProxyAddress;
+            var addr = _api.ActiveProxyAddress;   // 默认反代返回空串 → 走占位提示
             if (_txtProxy.Text != addr) _txtProxy.Text = addr;
             _applyingProxy = false;
         }
@@ -481,10 +500,35 @@ internal sealed class SettingsForm : Form
             int v => v + " ms"
         };
         var bad = _lastLatency == null || _lastLatency == -1 || _lastLatency > LatencyThresholdMs;
-        // 状态条已延展到「优选代理」右缘（340px），文案可恢复完整表述
+        // 状态条宽 240px：提示语用短版，实测最长组合（默认代理 + 4 位延迟 + 提示）≈ 231px 不溢出
         _lblProxyInfo.Text = $"类型：{_api.ActiveTier}    延迟：{lat}"
-            + (bad ? "    ⚠ 建议点「优选代理」" : "");
+            + (bad ? "    ⚠ 建议优选" : "");
         _lblProxyInfo.ForeColor = bad ? Color.FromArgb(196, 90, 48) : Color.FromArgb(105, 105, 105);
+    }
+
+    /// <summary>
+    /// 恢复默认代理：清掉自定义反代 + 手填代理，回到内置默认反代（隐藏资源）。
+    /// </summary>
+    private void RestoreDefaultProxy()
+    {
+        _applyingProxy = true;
+        try
+        {
+            _txtProxy.Text = "";
+            _cfg.ManualProxy = "";
+            _cfg.ManualProxyLocked = false;
+            _cfg.CfProxyUrl = "";
+            _cfg.CfProxyUrls = null;   // 空 = 用内置默认反代
+            _cfg.Save();
+        }
+        finally { _applyingProxy = false; }
+
+        _api.SetManualProxy("", false);
+        _api.SetMirrors(null);
+        _onProxyChanged?.Invoke();
+        _lastLatency = null;
+        _ = RefreshLatencyAsync();
+        _lblProxyInfo.Text = "已恢复默认代理";
     }
 
     /// <summary>实测当前链路延迟（内部连测 2 次取较小值，抗偶发尖峰）并刷新状态条。</summary>
@@ -533,7 +577,7 @@ internal sealed class SettingsForm : Form
             _api.SetManualProxy(url, false);
             _lastLatency = -1;
             UpdateProxyUi();
-            _lblProxyInfo.Text = "类型：手填代理    延迟：不可用    ⚠ 可在「代理管理」获取公共代理";
+            _lblProxyInfo.Text = "类型：手填代理    延迟：不可用    ⚠ 换默认";
             _lblProxyInfo.ForeColor = Color.FromArgb(196, 90, 48);
             return;
         }
@@ -556,11 +600,22 @@ internal sealed class SettingsForm : Form
             var r = await _api.PickBestAsync();
             if (r == null)
             {
+                if (_api.UsingDefaultMirror)
+                {
+                    // 默认代理不参与优选：此时"优选不到"= 其他链路实测都不可用，继续用默认代理即可
+                    await RefreshLatencyAsync();
+                    MessageBox.Show(
+                        "内置默认代理不参与优选。\n\n" +
+                        "其他链路（直连 / 自有反代 / 用户代理 / 公共池）实测均不可用，" +
+                        "将继续使用默认代理，无需处理。",
+                        "优选代理", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
                 _lastLatency = -1;
                 UpdateProxyUi();
                 MessageBox.Show(
                     "当前所有链路（直连 / 反代 / 用户代理 / 公共池）都无法访问 wallhaven。\n\n" +
-                    "建议：在「代理管理」中填入反代地址，或点「更新代理源」重新抓取公共代理。",
+                    "建议：点「恢复默认代理」使用内置默认代理，或在「代理管理」中填入自己的反代地址。",
                     "优选代理", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
