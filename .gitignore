@@ -20,3 +20,5 @@ _verify/
 
 # 内部优化方案文档（不公开）
 docs/*优化方案.md
+docs/*方案.md
+docs/*诊断.md

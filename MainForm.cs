@@ -11,6 +11,7 @@ internal sealed class MainForm : Form
 {
     private readonly AppConfig _cfg;
     private readonly WallhavenClient _api;
+    private readonly SourceRegistry _sources;
     private readonly CacheManager _cache;
     private readonly RotationEngine _engine;
     private readonly HistoryStore _history;
@@ -44,6 +45,10 @@ internal sealed class MainForm : Form
     private readonly ComboBox _cboMonitors = new();
     private Button _btnRotScope = new();
     private ToolStripDropDown _rotMenu = new();
+    // v1.4.0 壁纸源
+    private Button _btnSources = new();
+    private ContextMenuStrip _srcMenu = new();
+    private bool _buildingSourceMenu;
     private int _buildingRotationMenu;   // RebuildRotationMenu 期间抑制「调整范围触发换壁纸」
     private bool _syncingSelectAll;      // SyncSelectAll 回写「全选」勾选期间，抑制其 CheckedChanged 批处理
 
@@ -67,6 +72,7 @@ internal sealed class MainForm : Form
     {
         _cfg = cfg;
         _api = api;
+        _sources = new SourceRegistry(api);
         _cache = cache;
         _engine = engine;
         _history = history;
@@ -308,6 +314,26 @@ internal sealed class MainForm : Form
         };
         row.Controls.Add(_btnRotScope);
 
+        // v1.4.0 壁纸源：多选菜单，决定图墙从哪些源取图（频道树只对 wallhaven 生效）
+        _btnSources = new Button
+        {
+            Width = 108,
+            Height = 26,
+            Margin = new Padding(0, 2, 8, 0),
+            Font = new Font("Microsoft YaHei UI", 9),
+            FlatStyle = FlatStyle.Flat
+        };
+        _btnSources.FlatAppearance.BorderSize = 1;
+        _btnSources.FlatAppearance.BorderColor = Color.FromArgb(200, 200, 200);
+        _srcMenu = new ContextMenuStrip { ShowImageMargin = false };
+        _srcMenu.Opening += (_, _) => RebuildSourceMenu();
+        _btnSources.Click += (_, _) =>
+        {
+            RebuildSourceMenu();
+            _srcMenu.Show(_btnSources, new Point(0, _btnSources.Height));
+        };
+        row.Controls.Add(_btnSources);
+
         row.Controls.Add(new Label
         {
             Text = "间隔",
@@ -424,7 +450,76 @@ internal sealed class MainForm : Form
         _tips.SetToolTip(_cboMonitors, "多显示器壁纸模式，切换立即生效");
 
         RebuildRotationMenu();
+        UpdateSourceButtonText();
+        _tips.SetToolTip(_btnSources, "点击展开壁纸源多选列表，可同时勾选多个；勾选即时生效并重新加载\n免注册源：Bing 每日壁纸 / 360 壁纸 / Picsum\n需 Key 源：Unsplash / Pexels / Pixabay（在设置页填写后可用）");
         return row;
+    }
+
+    /// <summary>按钮文字显示已启用源数量，如「壁纸源 3」。</summary>
+    private void UpdateSourceButtonText()
+    {
+        var n = _sources.Enabled(_cfg).Count;
+        _btnSources.Text = $"壁纸源 {n}";
+    }
+
+    /// <summary>
+    /// 重建壁纸源多选菜单。每个源一项，右侧标注状态（免注册 / 已配置 / 未配置 Key / 需反代）。
+    /// 未配置 Key 的源仍可勾选但不会被列入启用集合（Enabled 会自动排除），菜单中用灰字提示。
+    /// </summary>
+    private void RebuildSourceMenu()
+    {
+        _buildingSourceMenu = true;
+        _srcMenu.Items.Clear();
+
+        var enabled = new HashSet<string>(
+            (_cfg.EnabledSources ?? SourceRegistry.DefaultEnabled.ToList()).Select(s => s),
+            StringComparer.OrdinalIgnoreCase);
+
+        foreach (var s in _sources.All)
+        {
+            var ready = s.IsReady(_cfg);
+            var status = s.StatusText(_cfg);
+            var text = $"{s.DisplayName}　{status}";
+            var item = new ToolStripMenuItem(text)
+            {
+                CheckOnClick = true,
+                Checked = enabled.Contains(s.Key),
+                Enabled = true,
+                ForeColor = ready ? SystemColors.ControlText : Color.FromArgb(150, 150, 150),
+                Tag = s
+            };
+            item.CheckedChanged += (_, _) =>
+            {
+                if (_buildingSourceMenu) return;
+                var src = (IWallpaperSource)item.Tag!;
+                var keys = (_cfg.EnabledSources ?? SourceRegistry.DefaultEnabled.ToList()).ToList();
+                if (item.Checked)
+                {
+                    if (!keys.Contains(src.Key, StringComparer.OrdinalIgnoreCase))
+                        keys.Add(src.Key);
+                }
+                else
+                {
+                    keys.RemoveAll(k => string.Equals(k, src.Key, StringComparison.OrdinalIgnoreCase));
+                    // 至少保留一个源，否则图墙永远空白
+                    if (_sources.Enabled(_cfg).Count == 0)
+                    {
+                        item.Checked = true;
+                        _status.Text = "至少需保留一个壁纸源";
+                        return;
+                    }
+                }
+                _cfg.EnabledSources = keys;
+                _cfg.Save();
+                UpdateSourceButtonText();
+                _page = 1;
+                _ended = false;
+                if (!_favMode) Reload();
+            };
+            _srcMenu.Items.Add(item);
+        }
+
+        _buildingSourceMenu = false;
     }
 
     private static Button AddRowButton(FlowLayoutPanel row, string text, int width, Action onClick, int leftMargin = 0)
@@ -870,9 +965,20 @@ internal sealed class MainForm : Form
 
             var useSeed = sorting == "random" ? _seed : null;
             Logger.Info($"load: key={_currentChannelKey} cat={ch.Category} purity={purity} q=\"{ch.Query}\" page={_page} seed=\"{useSeed}\"");
-            var list = await _api.SearchAsync(ch.Category, purity, sorting, ch.Query, resolution, _page, useSeed);
-            if (list == null) Logger.Warn("load: search returned null (network fail)");
-            else Logger.Info($"load: search ok, {list.Count} items");
+
+            // v1.4.0：多源聚合。壁纸源决定「从哪来」，频道树只对 wallhaven 生效。
+            var list = await _sources.FetchMergedAsync(_cfg, new SourceFetchRequest
+            {
+                Page = _page,
+                PerPage = 24,
+                Seed = useSeed,
+                WhCategory = ch.Category,
+                WhQuery = ch.Query,
+                Purity = purity,
+                Sorting = sorting
+            });
+            if (list == null || list.Count == 0) Logger.Warn("load: merged sources returned empty");
+            else Logger.Info($"load: merged ok, {list.Count} items");
 
             if (list == null || list.Count == 0)
             {

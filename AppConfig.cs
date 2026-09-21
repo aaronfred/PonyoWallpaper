@@ -22,6 +22,23 @@ internal class AppConfig
     /// <summary>旧版分类码选择（010/100/001），仅用于迁移，加载后清空。</summary>
     public List<string>? RotationCategories { get; set; }
 
+    // —— 壁纸源（v1.4.0 多源）——
+    /// <summary>
+    /// 已启用的壁纸源 key 列表（"wallhaven" / "bing" / "qh360" / "picsum" / "unsplash" / "pexels" / "pixabay"）。
+    /// 空或 null = 使用内置默认组合（免注册且国内可达：bing + qh360 + picsum）。
+    /// 需 Key 的源即使列在这里，Key 未填也会被自动排除。
+    /// </summary>
+    public List<string>? EnabledSources { get; set; }
+
+    /// <summary>Unsplash Access Key（Access Key 直传，不是 Secret）。留空 = 不启用该源。</summary>
+    public string UnsplashKey { get; set; } = "";
+
+    /// <summary>Pexels API Key。留空 = 不启用该源。</summary>
+    public string PexelsKey { get; set; } = "";
+
+    /// <summary>Pixabay API Key。留空 = 不启用该源。</summary>
+    public string PixabayKey { get; set; } = "";
+
     // —— 通用 ——
     public bool StartMinimized { get; set; } = true;
     public int CacheLimitMb { get; set; } = 2048;
