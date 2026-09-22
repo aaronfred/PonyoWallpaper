@@ -109,6 +109,7 @@ internal static class Program
             Application.SetHighDpiMode(HighDpiMode.SystemAware);
 
             var cfg = AppConfig.Load();
+            SourceRegistry.NormalizeEnabled(cfg);   // v1.5.0 配置迁移：剔除已移除的源并补上新默认源
             AppPaths.SetCacheRoot(cfg.CacheDirPath);
             var api = new WallhavenClient(cfg.ApiKey, cfg.ProxyUrl, cfg.ProxyUser, cfg.ProxyPassword, cfg.ProxyUrls);
             api.SetMirrors(cfg.CfProxyUrls); // CF 反代：启用后对应链路直连反代

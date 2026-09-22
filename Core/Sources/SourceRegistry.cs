@@ -38,6 +38,49 @@ internal sealed class SourceRegistry
 
     public IReadOnlyList<IWallpaperSource> All => _all;
 
+    /// <summary>全部已注册源 key（静态表，供配置迁移用）。</summary>
+    private static readonly string[] AllKeys = { "wallhaven", "qh360", "wallpapercave" };
+
+    /// <summary>
+    /// 配置迁移（启动时调用一次）：
+    /// 1) 剔除已不存在的源 key（如 v1.5.0 移除的 bing/picsum/unsplash/pexels/pixabay）；
+    /// 2) 若旧配置里存在已移除的源，说明是升级用户 —— 自动补上新默认源，避免升级后可用源变少；
+    /// 3) 过滤后为空则回落到默认组合。
+    /// 变更时立即落盘，保证界面（源菜单勾选状态）与配置一致。
+    /// </summary>
+    public static void NormalizeEnabled(AppConfig cfg)
+    {
+        var keys = cfg.EnabledSources;
+        if (keys == null || keys.Count == 0)
+        {
+            cfg.EnabledSources = DefaultEnabled.ToList();
+            cfg.Save();
+            return;
+        }
+
+        static bool Known(string k) => AllKeys.Contains(k, StringComparer.OrdinalIgnoreCase);
+        var hadRemoved = keys.Any(k => !Known(k));
+        var kept = keys.Where(Known).ToList();
+
+        if (kept.Count == 0)
+        {
+            kept = DefaultEnabled.ToList();
+        }
+        else if (hadRemoved)
+        {
+            foreach (var d in DefaultEnabled)
+                if (!kept.Contains(d, StringComparer.OrdinalIgnoreCase))
+                    kept.Add(d);
+        }
+
+        if (kept.Count != keys.Count || !kept.SequenceEqual(keys, StringComparer.OrdinalIgnoreCase))
+        {
+            Logger.Info($"sources migrated: [{string.Join(",", keys)}] -> [{string.Join(",", kept)}]");
+            cfg.EnabledSources = kept;
+            cfg.Save();
+        }
+    }
+
     public IWallpaperSource? Find(string key) => _byKey.TryGetValue(key, out var s) ? s : null;
 
     /// <summary>已启用且当前可用的源（未配置 Key 的需 Key 源自动排除）。</summary>
