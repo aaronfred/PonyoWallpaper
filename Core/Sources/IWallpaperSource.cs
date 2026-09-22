@@ -20,17 +20,18 @@ internal sealed class SourceFetchRequest
 
     /// <summary>
     /// 通用关键词（频道 Query 去掉 + 号，如 "landscape nature"）。
-    /// 支持检索的源（Unsplash/Pexels）用它搜索；360 按频道映射到自家分类；
-    /// Bing/Picsum 无检索能力，忽略（继续精选流）。
+    /// v1.5.0 现役三个源都支持检索：wallhaven 用 +tag 语法（WhQuery），
+    /// WallpaperCave 用它检索专辑，360 按 ChannelKey 映射到自家分类。
     /// </summary>
     public string Keywords { get; init; } = "";
 }
 
 /// <summary>
 /// 壁纸源统一接口。
-/// 设计要点：各站分类体系不同（wallhaven 23 频道 / 360 18 类 / Unsplash、Pexels 无分类 / Bing 无查询），
-/// 因此不硬性对齐分类 ID——wallhaven 用 +tag 语法，Unsplash/Pexels 用 Keywords 检索，
-/// 360 按频道映射到自家分类，Bing/Picsum 无检索能力继续精选流。
+/// 设计要点：各站分类体系不同（wallhaven 23 频道 / 360 18 类 / WallpaperCave 专辑检索），
+/// 因此不硬性对齐分类 ID——wallhaven 用 +tag 语法，WallpaperCave 用关键词检索专辑，
+/// 360 按频道映射到自家分类。
+/// v1.5.0：仅保留提供电脑横屏壁纸的源；竖屏/手机壁纸源不接入。
 /// </summary>
 internal interface IWallpaperSource
 {

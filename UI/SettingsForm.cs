@@ -24,13 +24,9 @@ internal sealed class SettingsForm : Form
     // v1.2.0：当前代理 = 一个可编辑文本框（显示当前生效代理，也可直接手填）+ 下方等宽状态条
     private readonly TextBox _txtProxy = new();
     private readonly Label _lblProxyInfo = new();
-    // v1.4.0 壁纸源 API Key（留空 = 不启用对应源）
-    private readonly TextBox _txtUnsplash = new();
-    private readonly TextBox _txtPexels = new();
-    private readonly TextBox _txtPixabay = new();
+    // v1.4.0 壁纸源 API Key 已随需 Key 源一并移除（v1.5.0）
     private int? _lastLatency;          // 最近一次实测延迟（null = 未测，-1 = 不可达）
     private readonly System.Windows.Forms.Timer _proxyTimer = new() { Interval = 800 };
-    private readonly System.Windows.Forms.Timer _srcKeyTimer = new() { Interval = 800 };
     private bool _applyingProxy;        // 程序回填文本框时抑制其 TextChanged 自动应用
     private const int LatencyThresholdMs = 2000;   // 延迟阈值（实测正常值约 840ms）
     private readonly System.Windows.Forms.Timer _uiTimer = new() { Interval = 5000 };
@@ -43,7 +39,7 @@ internal sealed class SettingsForm : Form
     private int _versionClicks;
     private bool _loadingValues;   // LoadValues 回填期间抑制控件事件，防止打开设置就触发主窗口重建
     private readonly ToolTip _tips = new();
-    private const int BaseHeight = 532;
+    private const int BaseHeight = 436;
     private const int HiddenPanelHeight = 116;
 
     public SettingsForm(AppConfig cfg, WallhavenClient api, CacheManager cache, Action onSaved,
@@ -141,48 +137,8 @@ internal sealed class SettingsForm : Form
         _tips.SetToolTip(_txtProxy, "显示当前生效的代理；可直接手填（socks5:// 或 http://，可含 user:pass@）并自动锁定使用；清空则回到自动链路");
         _tips.SetToolTip(btnRestoreDefault, "清除自定义反代与手填代理，回到内置默认代理（原配置将被覆盖）");
 
-        // v1.4.0 壁纸源 API Key：三个需注册的源，填了才会在首页源菜单中可用。
-        // 免注册源（Bing 每日壁纸 / 360 壁纸 / Picsum）无需配置，始终可用。
-        var srcPanel = new Panel { Width = 340, Height = 96 };
-        var srcKeys = new (string Label, TextBox Box, Action<string> Set, Func<string> Get)[]
-        {
-            ("Unsplash", _txtUnsplash, v => _cfg.UnsplashKey = v, () => _cfg.UnsplashKey),
-            ("Pexels",   _txtPexels,   v => _cfg.PexelsKey   = v, () => _cfg.PexelsKey),
-            ("Pixabay",  _txtPixabay,  v => _cfg.PixabayKey  = v, () => _cfg.PixabayKey),
-        };
-        for (var i = 0; i < srcKeys.Length; i++)
-        {
-            var (label, box, set, get) = srcKeys[i];
-            var yy = i * 32;
-            var lb = new Label
-            {
-                Text = label,
-                Font = new Font("Microsoft YaHei UI", 9),
-                ForeColor = Color.FromArgb(105, 105, 105),
-                Bounds = new Rectangle(0, yy + 4, 72, 22),
-                AutoSize = false,
-                TextAlign = ContentAlignment.MiddleLeft
-            };
-            box.SetBounds(76, yy, 264, 26);
-            box.Font = new Font("Microsoft YaHei UI", 9);
-            box.UseSystemPasswordChar = true;
-            box.PlaceholderText = "留空 = 不启用该源";
-            box.TextChanged += (_, _) =>
-            {
-                if (_loadingValues) return;
-                _srcKeyTimer.Stop(); _srcKeyTimer.Start();
-            };
-            srcPanel.Controls.Add(lb);
-            srcPanel.Controls.Add(box);
-        }
-        _srcKeyTimer.Tick += (_, _) => { _srcKeyTimer.Stop(); SaveSourceKeys(); };
-        foreach (var (_, box, _, _) in srcKeys)
-            box.Leave += (_, _) => { _srcKeyTimer.Stop(); SaveSourceKeys(); };
-        y = PlaceRow(rows, y, "壁纸源 Key", srcPanel, 96);
-        srcPanel.Size = new Size(340, 96);
-        _tips.SetToolTip(_txtUnsplash, "Unsplash Access Key；留空则在首页源菜单中不可用（免费额度 50 次/小时）");
-        _tips.SetToolTip(_txtPexels, "Pexels API Key；留空则不可用（免费额度 200 次/小时）");
-        _tips.SetToolTip(_txtPixabay, "Pixabay API Key；留空则不可用（免费额度 100 次/60 秒）");
+        // v1.5.0：需要 API Key 的壁纸源（Unsplash / Pexels / Pixabay）已移除，
+        // 现源为 wallhaven / 360 壁纸 / WallpaperCave，均免注册，故不再有「壁纸源 Key」行。
 
         y = PlaceRow(rows, y, "开机自启", _autostart);
         y = PlaceRow(rows, y, "启动最小化到托盘", _startMinimized);
@@ -497,23 +453,11 @@ internal sealed class SettingsForm : Form
             _theme.SelectedIndex = Math.Clamp(_cfg.Theme, 0, 2);
             _apiKey.Text = _cfg.ApiKey;
             _chkShowNsfw.Checked = _cfg.ShowNsfw;
-            _txtUnsplash.Text = _cfg.UnsplashKey ?? "";
-            _txtPexels.Text = _cfg.PexelsKey ?? "";
-            _txtPixabay.Text = _cfg.PixabayKey ?? "";
         }
         finally { _loadingValues = false; }
     }
 
     /// <summary>保存三个壁纸源 API Key（停手 800ms 或失焦时触发），即时生效。</summary>
-    private void SaveSourceKeys()
-    {
-        if (_loadingValues) return;
-        _cfg.UnsplashKey = _txtUnsplash.Text.Trim();
-        _cfg.PexelsKey = _txtPexels.Text.Trim();
-        _cfg.PixabayKey = _txtPixabay.Text.Trim();
-        _cfg.Save();
-    }
-
     /// <summary>打开日志文件夹（查看 hosts 更新等操作的详细日志）。</summary>
     protected override void OnFormClosed(FormClosedEventArgs e)
     {

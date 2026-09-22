@@ -25,19 +25,11 @@ internal class AppConfig
     // —— 壁纸源（v1.4.0 多源）——
     /// <summary>
     /// 已启用的壁纸源 key 列表（"wallhaven" / "bing" / "qh360" / "picsum" / "unsplash" / "pexels" / "pixabay"）。
-    /// 空或 null = 使用内置默认组合（免注册且国内可达：bing + qh360 + picsum）。
-    /// 需 Key 的源即使列在这里，Key 未填也会被自动排除。
+    /// 空或 null = 使用内置默认组合（wallhaven + qh360 + wallpapercave）。
+    /// v1.5.0：需 Key 的源（Unsplash / Pexels / Pixabay）已移除，其配置字段一并删除；
+    /// 旧配置文件里残留的键会被反序列化时自动忽略，不影响启动。
     /// </summary>
     public List<string>? EnabledSources { get; set; }
-
-    /// <summary>Unsplash Access Key（Access Key 直传，不是 Secret）。留空 = 不启用该源。</summary>
-    public string UnsplashKey { get; set; } = "";
-
-    /// <summary>Pexels API Key。留空 = 不启用该源。</summary>
-    public string PexelsKey { get; set; } = "";
-
-    /// <summary>Pixabay API Key。留空 = 不启用该源。</summary>
-    public string PixabayKey { get; set; } = "";
 
     // —— 通用 ——
     public bool StartMinimized { get; set; } = true;

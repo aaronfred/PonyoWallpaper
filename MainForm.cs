@@ -328,7 +328,9 @@ internal sealed class MainForm : Form
         // v1.4.0 壁纸源：多选菜单，决定图墙从哪些源取图。
         // v1.4.1 修复：ContextMenuStrip 默认点任意项就关闭 → 实际只能勾一个。
         // AutoClose=false + 失焦关闭 → 可连续勾选多个，点菜单外部/Esc 才收起。
-        _srcMenu = new ContextMenuStrip { ShowImageMargin = false, AutoClose = false };
+        // 注意：不能设 ShowImageMargin=false —— 勾选标记就画在图像边距列里，
+        // 关掉后菜单上看不到任何勾选状态，用户会以为"多选没生效"（v1.5.0 修）
+        _srcMenu = new ContextMenuStrip { AutoClose = false };
         _srcMenu.LostFocus += (_, _) => _srcMenu.Close();
         _srcMenu.KeyDown += (_, e) => { if (e.KeyCode == Keys.Escape) _srcMenu.Close(); };
         _srcMenu.Opening += (_, _) => RebuildSourceMenu();
@@ -456,7 +458,7 @@ internal sealed class MainForm : Form
 
         RebuildRotationMenu();
         UpdateSourceButtonText();
-        _tips.SetToolTip(_btnSources, "点击展开壁纸源多选列表，可同时勾选多个；勾选即时生效并重新加载\n免注册源：Bing 每日壁纸 / 360 壁纸 / Picsum\n需 Key 源：Unsplash / Pexels / Pixabay（在设置页填写后可用）");
+        _tips.SetToolTip(_btnSources, "点击展开壁纸源多选列表，可同时勾选多个；勾选即时生效并重新加载\nwallhaven：需代理，频道分类最全（23 频道）\n360 壁纸：国内免注册，按频道映射到自家 18 个分类\nWallpaperCave：国际免注册，按频道关键词检索专辑，只出电脑横屏壁纸");
         return row;
     }
 
@@ -476,9 +478,10 @@ internal sealed class MainForm : Form
         _buildingSourceMenu = true;
         _srcMenu.Items.Clear();
 
-        var enabled = new HashSet<string>(
-            (_cfg.EnabledSources ?? SourceRegistry.DefaultEnabled.ToList()).Select(s => s),
-            StringComparer.OrdinalIgnoreCase);
+        // 当前生效的源集合。注意必须与 SourceRegistry.Enabled 用同一套归一化：
+        // 配置为 null 或空列表都视为「默认组合」——否则会出「菜单一个勾都没有、按钮却显示
+        // 壁纸源 3」的自相矛盾状态（v1.5.0 修）
+        var enabled = new HashSet<string>(CurrentSourceKeys(), StringComparer.OrdinalIgnoreCase);
 
         foreach (var s in _sources.All)
         {
@@ -497,7 +500,7 @@ internal sealed class MainForm : Form
             {
                 if (_buildingSourceMenu) return;
                 var src = (IWallpaperSource)item.Tag!;
-                var keys = (_cfg.EnabledSources ?? SourceRegistry.DefaultEnabled.ToList()).ToList();
+                var keys = CurrentSourceKeys().ToList();
                 if (item.Checked)
                 {
                     if (!keys.Contains(src.Key, StringComparer.OrdinalIgnoreCase))
@@ -506,10 +509,14 @@ internal sealed class MainForm : Form
                 else
                 {
                     keys.RemoveAll(k => string.Equals(k, src.Key, StringComparison.OrdinalIgnoreCase));
-                    // 至少保留一个源，否则图墙永远空白
-                    if (_sources.Enabled(_cfg).Count == 0)
+                    // 至少保留一个源，否则图墙永远空白。
+                    // 必须判断「本次改动后」的列表：此前判断的是尚未更新的 _cfg（旧值），
+                    // 于是最后一个源也能被取消 → 配置存成空列表（v1.5.0 修）
+                    if (keys.Count == 0)
                     {
+                        _buildingSourceMenu = true;   // 回滚勾选状态但不触发再次进入
                         item.Checked = true;
+                        _buildingSourceMenu = false;
                         _status.Text = "至少需保留一个壁纸源";
                         return;
                     }
@@ -521,6 +528,22 @@ internal sealed class MainForm : Form
                 _ended = false;
                 if (!_favMode) Reload();
             };
+
+            // 「只看此源」：一键切到单源浏览，避免混排里分不清图来自哪个源
+            var only = new ToolStripMenuItem($"只看此源（{s.DisplayName}）");
+            only.Click += (_, _) =>
+            {
+                _cfg.EnabledSources = new List<string> { s.Key };
+                _cfg.Save();
+                UpdateSourceButtonText();
+                _page = 1;
+                _ended = false;
+                _status.Text = $"只显示：{s.DisplayName}";
+                _srcMenu.Close();
+                if (!_favMode) Reload();
+            };
+            item.DropDownItems.Add(only);
+
             _srcMenu.Items.Add(item);
         }
 
@@ -532,6 +555,17 @@ internal sealed class MainForm : Form
                 it.ForeColor = Color.FromArgb(150, 150, 150);
 
         _buildingSourceMenu = false;
+    }
+
+    /// <summary>
+    /// 当前生效的源 key 列表（配置为 null/空 → 默认组合），与 SourceRegistry.Enabled 的归一化保持一致。
+    /// </summary>
+    private List<string> CurrentSourceKeys()
+    {
+        var keys = _cfg.EnabledSources;
+        return keys == null || keys.Count == 0
+            ? SourceRegistry.DefaultEnabled.ToList()
+            : keys.ToList();
     }
 
     private static Button AddRowButton(FlowLayoutPanel row, string text, int width, Action onClick, int leftMargin = 0)
@@ -1020,12 +1054,14 @@ internal sealed class MainForm : Form
 
             int added = 0;
             var seen = new HashSet<string>();
+            var srcLabels = new List<string>();
             foreach (var card in _flow.Cards) seen.Add(card.Item.Id);
             foreach (var item in list)
             {
                 if (_blacklist.Contains(item.StoreId) || seen.Contains(item.StoreId)) continue;
                 AddCard(item);
                 added++;
+                if (!srcLabels.Contains(item.SourceLabel)) srcLabels.Add(item.SourceLabel);
             }
             _page++;
             if (added > 0) _emptyStreak = 0;
@@ -1035,7 +1071,9 @@ internal sealed class MainForm : Form
                 "random" => "随机", "hot" => "热门", "date_added" => "最新",
                 "views" => "浏览最多", "favorites" => "收藏最多", _ => sorting
             };
-            _status.Text = $"已加载 {_flow.CardCount} 张 · {ch.Name} · {sortName} · 第 {_page - 1} 页";
+            // 末尾标出本页图片来自哪些源：多源混排时用户能一眼看出混合是预期行为
+            var srcNote = srcLabels.Count > 0 ? " · 源 " + string.Join("/", srcLabels) : "";
+            _status.Text = $"已加载 {_flow.CardCount} 张 · {ch.Name} · {sortName} · 第 {_page - 1} 页{srcNote}";
 
             // 首屏未撑满则自动续一页。必须 BeginInvoke 延后执行：本方法 finally 还没跑、
             // _loading 仍为 true，直接递归调用会被自身的重入保护拦掉（此前自动续页从未生效）

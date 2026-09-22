@@ -18,18 +18,26 @@ internal sealed class WallpaperItem
     public long FileSize { get; init; }
     public string PageUrl { get; init; } = "";
 
+    /// <summary>
+    /// 是否横屏（宽 &gt; 高）。用户要求只上电脑壁纸，各源据此过滤竖屏/手机壁纸；
+    /// 无尺寸信息的源（wallhaven/360 本身即横屏）保持默认 true。
+    /// </summary>
+    public bool Landscape { get; init; } = true;
+
     /// <summary>卡片角标用的来源缩写。</summary>
     public string SourceLabel =>
         SourceKey switch
         {
-            "wallhaven" => "WH",
-            "bing"      => "Bing",
-            "unsplash"  => "UN",
-            "pexels"    => "PX",
-            "pixabay"   => "PB",
-            "qh360"     => "360",
-            "picsum"    => "LP",
-            _           => SourceKey
+            "wallhaven"     => "WH",
+            "qh360"         => "360",
+            "wallpapercave" => "WCV",
+            "wallhalla"     => "WL",
+            "bing"          => "Bing",
+            "unsplash"      => "UN",
+            "pexels"        => "PX",
+            "pixabay"       => "PB",
+            "picsum"        => "LP",
+            _               => SourceKey
         };
 
     /// <summary>复合主键（含冒号，仅用于内部比较/日志，不要做文件名）。</summary>
