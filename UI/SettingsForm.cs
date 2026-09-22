@@ -109,11 +109,13 @@ internal sealed class SettingsForm : Form
         btnGuide.FlatAppearance.BorderColor = Color.FromArgb(200, 200, 200);
         btnGuide.Click += (_, _) => OpenProxyGuide();
 
-        // 状态条：与文本框等宽，显示代理类型与实测延迟；超阈值时追加提示
+        // 状态条：与文本框等宽，显示代理类型与实测延迟；超阈值时追加提示。
+        // Tag="self"：颜色由 UpdateProxyUi 按状态+主题自管，ThemeManager 不接管（否则深色下白底刺眼）
         _lblProxyInfo.SetBounds(0, 28, 240, 24);
         _lblProxyInfo.AutoSize = false;
         _lblProxyInfo.TextAlign = ContentAlignment.MiddleLeft;
         _lblProxyInfo.Font = new Font("Microsoft YaHei UI", 8);
+        _lblProxyInfo.Tag = "self";
         _lblProxyInfo.ForeColor = Color.FromArgb(105, 105, 105);
         _lblProxyInfo.BackColor = Color.FromArgb(245, 245, 245);
 
@@ -265,6 +267,7 @@ internal sealed class SettingsForm : Form
             _cfg.Theme = _theme.SelectedIndex < 0 ? 0 : _theme.SelectedIndex;
             _cfg.Save();
             ThemeManager.Apply(this, ThemeManager.ShouldUseDark(_cfg.Theme));
+            UpdateProxyUi();   // 状态条颜色自管（Tag="self"），切主题后立即按新主题刷新
             _onSaved(); // 主窗口主题 + 托盘提示同步
         };
 
@@ -346,19 +349,22 @@ internal sealed class SettingsForm : Form
         var btnSave = new Button
         {
             Text = "完成",
-            Anchor = AnchorStyles.Right | AnchorStyles.Bottom,
-            Location = new Point(Width - 96, 14),
             Size = new Size(80, 28),
             BackColor = Color.FromArgb(216, 90, 48),
             ForeColor = Color.White,
             FlatStyle = FlatStyle.Flat
         };
+        // 不可用 Anchor：footer 尚未入父时宽为默认 200px，锚点基线按 200px 计算，
+        // footer 被 Dock 撑到实际宽度后锚点重算会把按钮推出窗外（v1.4.2 实测「完成」不可见）。
+        // 改为跟随 footer 宽度定位，任何时候都贴右缘。
+        void PlaceSave() => btnSave.Location = new Point(Math.Max(0, footer.Width - 96), 14);
+        footer.Resize += (_, _) => PlaceSave();
         btnSave.FlatAppearance.BorderSize = 0;
         btnSave.Click += (_, _) => Close();
         var btnOpenLogs = new Button
         {
             Text = "打开日志",
-            Location = new Point(110, 13),
+            Location = new Point(124, 13),   // 版本号标签 AutoSize 实宽到 x≈112，留 12px 间距（原 110 重叠 2px）
             Size = new Size(86, 26),
             Font = new Font("Microsoft YaHei UI", 8),
             FlatStyle = FlatStyle.Flat
@@ -374,6 +380,7 @@ internal sealed class SettingsForm : Form
         root.Controls.Add(rows);
         Controls.Add(root);
         Controls.Add(footer);
+        PlaceSave();   // footer 已 Dock 到实际宽度，立即贴右缘（Resize 事件只兜后续变化）
 
         // 悬停提示：功能 + 快捷键
         _tips.SetToolTip(btnOpenLogs, "打开日志文件夹（轮换等操作的详细日志）");
@@ -542,7 +549,12 @@ internal sealed class SettingsForm : Form
         // 状态条宽 240px：提示语用短版，实测最长组合（默认代理 + 4 位延迟 + 提示）≈ 231px 不溢出
         _lblProxyInfo.Text = $"类型：{_api.ActiveTier}    延迟：{lat}"
             + (bad ? "    ⚠ 恢复默认" : "");
-        _lblProxyInfo.ForeColor = bad ? Color.FromArgb(196, 90, 48) : Color.FromArgb(105, 105, 105);
+        // 颜色按主题 + 状态自管（Tag="self"，ThemeManager 不接管）；Tag="self" 的标签自带状态色逻辑
+        var dark = ThemeManager.LastDark;
+        _lblProxyInfo.BackColor = dark ? Color.FromArgb(37, 37, 38) : Color.FromArgb(245, 245, 245);
+        _lblProxyInfo.ForeColor = bad
+            ? (dark ? Color.FromArgb(235, 140, 90) : Color.FromArgb(196, 90, 48))   // 提示需恢复：橙
+            : (dark ? Color.FromArgb(160, 160, 160) : Color.FromArgb(105, 105, 105)); // 正常：次级灰
     }
 
     /// <summary>

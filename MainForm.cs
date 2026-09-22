@@ -524,6 +524,13 @@ internal sealed class MainForm : Form
             _srcMenu.Items.Add(item);
         }
 
+        // 菜单每次打开都整体重建 → 主题必须在重建后补涂（否则深色下是白底菜单）
+        ThemeManager.ApplyMenu(_srcMenu, ThemeManager.LastDark);
+        // 未就绪源的灰字提示在主题化后重新覆盖（ApplyMenu 会统一设前景色）
+        foreach (ToolStripItem it in _srcMenu.Items)
+            if (it.Tag is IWallpaperSource s && !s.IsReady(_cfg))
+                it.ForeColor = Color.FromArgb(150, 150, 150);
+
         _buildingSourceMenu = false;
     }
 
@@ -646,25 +653,8 @@ internal sealed class MainForm : Form
         // —— 关闭即保存已由 MenuClosingHandler 处理（点菜单外区域或 Esc 同样保存并关闭）
         dd.Closing += MenuClosingHandler;
 
-        // 深色主题适配菜单
-        if (ThemeManager.ShouldUseDark(_cfg.Theme))
-        {
-            var darkBg = Color.FromArgb(37, 37, 38);
-            var darkFg = Color.FromArgb(235, 235, 235);
-            dd.BackColor = darkBg;
-            dd.ForeColor = darkFg;
-            foreach (ToolStripItem it in dd.Items)
-            {
-                it.BackColor = darkBg;
-                it.ForeColor = darkFg;
-                if (it is ToolStripMenuItem mi)
-                    foreach (ToolStripItem sub in mi.DropDownItems)
-                    {
-                        sub.BackColor = darkBg;
-                        sub.ForeColor = darkFg;
-                    }
-            }
-        }
+        // 深色主题适配菜单（统一走 ThemeManager：递归全部层级，与托盘/源菜单同色）
+        ThemeManager.ApplyMenu(dd, ThemeManager.LastDark);
 
         return dd;
     }

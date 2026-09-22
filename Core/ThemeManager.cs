@@ -49,21 +49,39 @@ internal static class ThemeManager
         ApplyRecursive(root, dark, bg, panel, fg, fg2, inputBg, border, accent);
     }
 
+    /// <summary>
+    /// 下拉菜单（ContextMenuStrip / ToolStripDropDown）深浅色适配，递归全部层级的子菜单。
+    /// 调用方如需保留个别项的特殊前景色（如未就绪源的灰字），在本方法之后覆盖即可。
+    /// </summary>
+    public static void ApplyMenu(ToolStripDropDown menu, bool dark)
+    {
+        var bg = dark ? Color.FromArgb(37, 37, 38) : Color.White;
+        var fg = dark ? Color.FromArgb(235, 235, 235) : Color.FromArgb(30, 30, 30);
+        ApplyToolStrip(menu, dark, bg, fg);
+    }
+
     private static void ApplyToolStrip(ToolStrip ts, bool dark, Color bg, Color fg)
     {
         // 保持默认 Professional 渲染器：System 渲染器会忽略自定义 BackColor
         ts.BackColor = dark ? bg : Color.White;
         ts.ForeColor = fg;
-        foreach (ToolStripItem item in ts.Items) ApplyMenuItem(item, dark, bg, fg);
+        WalkMenuItems(ts.Items, dark, bg, fg);
     }
 
-    private static void ApplyMenuItem(ToolStripItem item, bool dark, Color bg, Color fg)
+    private static void WalkMenuItems(ToolStripItemCollection items, bool dark, Color bg, Color fg)
     {
-        item.BackColor = dark ? bg : Color.White;
-        item.ForeColor = fg;
-        if (item is ToolStripMenuItem mi)
-            foreach (ToolStripItem sub in mi.DropDownItems)
-                ApplyMenuItem(sub, dark, bg, fg);
+        foreach (ToolStripItem item in items)
+        {
+            item.BackColor = dark ? bg : Color.White;
+            item.ForeColor = fg;
+            // 级联子菜单：容器与子项都要着色（此前轮换菜单只铺了两层）
+            if (item is ToolStripMenuItem mi && mi.HasDropDownItems)
+            {
+                mi.DropDown.BackColor = dark ? bg : Color.White;
+                mi.DropDown.ForeColor = fg;
+                WalkMenuItems(mi.DropDownItems, dark, bg, fg);
+            }
+        }
     }
 
     private static void ApplyRecursive(Control c, bool dark, Color bg, Color panel, Color fg, Color fg2,
@@ -87,7 +105,9 @@ internal static class ThemeManager
             case Panel _:
                 c.BackColor = panel;
                 break;
-            case Label l:
+            case Label l when l.Tag is not "self":
+                // Tag="self" 的标签（如代理状态条）自带按状态/主题着色逻辑，这里不接管，
+                // 否则主题切换时会把状态色（橙=需恢复）覆盖成 fg2
                 l.ForeColor = fg2;
                 break;
             case CheckBox chk:
@@ -100,6 +120,9 @@ internal static class ThemeManager
             case ComboBox cb:
                 cb.BackColor = inputBg;
                 cb.ForeColor = fg;
+                // DropDownList 下 Standard 样式的下拉框面色不吃 BackColor（实测仍是白脸），
+                // 深色下切 Flat 才能让深色生效；浅色保持系统原生观感
+                cb.FlatStyle = dark ? FlatStyle.Flat : FlatStyle.Standard;
                 break;
             case NumericUpDown n:
                 n.BackColor = inputBg;

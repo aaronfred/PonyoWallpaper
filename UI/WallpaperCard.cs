@@ -98,6 +98,7 @@ internal sealed class WallpaperCard : Panel
         // 右键屏蔽
         var ctx = new ContextMenuStrip();
         ctx.Items.Add("屏蔽此图，不再出现", null, (_, _) => OnBlock?.Invoke(Item));
+        ThemeManager.ApplyMenu(ctx, ThemeManager.LastDark);   // 深色下跟随主题（否则白底菜单）
         ContextMenuStrip = ctx;
 
         // v1.4.0 来源角标：多源混合时用于区分图片来自哪个源
