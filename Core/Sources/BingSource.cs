@@ -46,7 +46,7 @@ internal sealed class BingSource : IWallpaperSource
                     Id = im.StartDate ?? Guid.NewGuid().ToString("N")[..8],
                     Path = baseUrl + "_UHD.jpg",
                     Thumb = baseUrl + "_400x240.jpg",
-                    Resolution = "1920x1080",
+                    Resolution = "UHD",
                     Category = "每日精选",
                     Purity = "sfw",
                     PageUrl = "https://cn.bing.com/"

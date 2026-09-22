@@ -1,6 +1,6 @@
 namespace PonyoWallpaper;
 
-/// <summary>多源取图请求。新源不提供关键词检索，只按各自「默认/精选流」翻页。</summary>
+/// <summary>多源取图请求。v1.4.1：Keywords 让频道对支持检索的源也生效。</summary>
 internal sealed class SourceFetchRequest
 {
     public int Page { get; init; } = 1;
@@ -9,18 +9,28 @@ internal sealed class SourceFetchRequest
     /// <summary>随机种子：换一批时变化，让支持随机的源给出不同结果。</summary>
     public string? Seed { get; init; }
 
-    // 以下是 wallhaven 专用（频道树只对它生效）；其他源忽略这些字段。
+    // wallhaven 专用（+tag 语法）。
     public string WhCategory { get; init; } = "100";
     public string WhQuery { get; init; } = "";
     public string Purity { get; init; } = "100";
     public string Sorting { get; init; } = "random";
+
+    /// <summary>当前频道 key（如 nature_landscape）。360 用它映射到自家分类。</summary>
+    public string ChannelKey { get; init; } = "";
+
+    /// <summary>
+    /// 通用关键词（频道 Query 去掉 + 号，如 "landscape nature"）。
+    /// 支持检索的源（Unsplash/Pexels）用它搜索；360 按频道映射到自家分类；
+    /// Bing/Picsum 无检索能力，忽略（继续精选流）。
+    /// </summary>
+    public string Keywords { get; init; } = "";
 }
 
 /// <summary>
 /// 壁纸源统一接口。
-/// 设计要点：各站分类体系不同（wallhaven 有 23 频道，360 有 18 类，Unsplash/Pexels 无分类，
-/// Bing 连查询都没有），因此<b>不做分类对齐</b>——每个源只按自己的默认/精选流翻页，
-/// 首页的「壁纸源」多选决定参与哪些源，频道树继续只对 wallhaven 生效。
+/// 设计要点：各站分类体系不同（wallhaven 23 频道 / 360 18 类 / Unsplash、Pexels 无分类 / Bing 无查询），
+/// 因此不硬性对齐分类 ID——wallhaven 用 +tag 语法，Unsplash/Pexels 用 Keywords 检索，
+/// 360 按频道映射到自家分类，Bing/Picsum 无检索能力继续精选流。
 /// </summary>
 internal interface IWallpaperSource
 {

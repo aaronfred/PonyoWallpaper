@@ -4,7 +4,7 @@ namespace PonyoWallpaper;
 
 /// <summary>
 /// Pexels（需 API Key，免费额度 200 次/小时、20000 次/月，是几家中最宽的）。
-/// 走 /v1/curated 精选流，不提供查询。
+/// v1.4.1：频道有关键词时走 /v1/search 检索，否则 /v1/curated 精选流。
 /// </summary>
 internal sealed class PexelsSource : IWallpaperSource
 {
@@ -18,7 +18,10 @@ internal sealed class PexelsSource : IWallpaperSource
     {
         if (!IsReady(cfg)) return null;
         var per = Math.Clamp(req.PerPage, 1, 80);
-        var url = $"https://api.pexels.com/v1/curated?page={Math.Max(1, req.Page)}&per_page={per}";
+        var kw = (req.Keywords ?? "").Trim();
+        var url = kw.Length > 0
+            ? $"https://api.pexels.com/v1/search?query={Uri.EscapeDataString(kw)}&page={Math.Max(1, req.Page)}&per_page={per}"
+            : $"https://api.pexels.com/v1/curated?page={Math.Max(1, req.Page)}&per_page={per}";
         try
         {
             using var msg = new HttpRequestMessage(HttpMethod.Get, url);
@@ -47,7 +50,7 @@ internal sealed class PexelsSource : IWallpaperSource
                     Path = AppendSize(orig!, w, h),
                     Thumb = AppendSize(p.Src?.Medium ?? orig!, 400, 0),
                     Resolution = $"{p.Width}x{p.Height}",
-                    Category = "精选",
+                    Category = kw.Length > 0 ? kw : "精选",
                     Purity = "sfw",
                     PageUrl = p.Url ?? "https://www.pexels.com/"
                 });

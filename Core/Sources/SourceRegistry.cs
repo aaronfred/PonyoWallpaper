@@ -67,6 +67,8 @@ internal sealed class SourceRegistry
                 Seed = req.Seed,
                 WhCategory = req.WhCategory,
                 WhQuery = req.WhQuery,
+                Keywords = req.Keywords,
+                ChannelKey = req.ChannelKey,
                 Purity = req.Purity,
                 Sorting = req.Sorting
             }, ct))

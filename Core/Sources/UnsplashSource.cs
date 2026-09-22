@@ -4,7 +4,7 @@ namespace PonyoWallpaper;
 
 /// <summary>
 /// Unsplash（需 API Key，免费额度 50 次/小时；国内图片 CDN 351ms 最快）。
-/// 走 /photos 精选流，不提供查询。
+/// v1.4.1：频道有关键词时走 /search/photos 检索，否则 /photos 精选流。
 /// </summary>
 internal sealed class UnsplashSource : IWallpaperSource
 {
@@ -18,7 +18,11 @@ internal sealed class UnsplashSource : IWallpaperSource
     {
         if (!IsReady(cfg)) return null;
         var per = Math.Clamp(req.PerPage, 1, 30);
-        var url = $"https://api.unsplash.com/photos?page={Math.Max(1, req.Page)}&per_page={per}&order_by=popular";
+        var kw = (req.Keywords ?? "").Trim();
+        var searching = kw.Length > 0;
+        var url = searching
+            ? $"https://api.unsplash.com/search/photos?query={Uri.EscapeDataString(kw)}&page={Math.Max(1, req.Page)}&per_page={per}&content_filter=high&order_by=relevance"
+            : $"https://api.unsplash.com/photos?page={Math.Max(1, req.Page)}&per_page={per}&order_by=popular";
         try
         {
             using var msg = new HttpRequestMessage(HttpMethod.Get, url);
@@ -30,7 +34,9 @@ internal sealed class UnsplashSource : IWallpaperSource
                 return null;
             }
             var json = await resp.Content.ReadAsStringAsync(ct);
-            var arr = System.Text.Json.JsonSerializer.Deserialize<List<UnsplashPhoto>>(json);
+            List<UnsplashPhoto>? arr = searching
+                ? System.Text.Json.JsonSerializer.Deserialize<UnsplashSearchResponse>(json)?.Results
+                : System.Text.Json.JsonSerializer.Deserialize<List<UnsplashPhoto>>(json);
             if (arr == null || arr.Count == 0) return Array.Empty<WallpaperItem>();
 
             var list = new List<WallpaperItem>();
@@ -48,7 +54,7 @@ internal sealed class UnsplashSource : IWallpaperSource
                     Path = AppendSize(raw!, w, h),
                     Thumb = AppendSize(p.Urls?.Thumb ?? raw!, 400, 0),
                     Resolution = $"{p.Width}x{p.Height}",
-                    Category = "精选",
+                    Category = searching ? kw : "精选",
                     Purity = "sfw",
                     PageUrl = p.Links?.Html ?? "https://unsplash.com/"
                 });
@@ -94,6 +100,12 @@ internal sealed class UnsplashSource : IWallpaperSource
         [JsonPropertyName("regular")] public string? Regular { get; set; }
         [JsonPropertyName("small")] public string? Small { get; set; }
         [JsonPropertyName("thumb")] public string? Thumb { get; set; }
+    }
+
+    private sealed class UnsplashSearchResponse
+    {
+        [JsonPropertyName("results")] public List<UnsplashPhoto>? Results { get; set; }
+        [JsonPropertyName("total_pages")] public int TotalPages { get; set; }
     }
 
     private sealed class UnsplashLinks

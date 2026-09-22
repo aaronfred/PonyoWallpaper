@@ -325,7 +325,12 @@ internal sealed class MainForm : Form
         };
         _btnSources.FlatAppearance.BorderSize = 1;
         _btnSources.FlatAppearance.BorderColor = Color.FromArgb(200, 200, 200);
-        _srcMenu = new ContextMenuStrip { ShowImageMargin = false };
+        // v1.4.0 壁纸源：多选菜单，决定图墙从哪些源取图。
+        // v1.4.1 修复：ContextMenuStrip 默认点任意项就关闭 → 实际只能勾一个。
+        // AutoClose=false + 失焦关闭 → 可连续勾选多个，点菜单外部/Esc 才收起。
+        _srcMenu = new ContextMenuStrip { ShowImageMargin = false, AutoClose = false };
+        _srcMenu.LostFocus += (_, _) => _srcMenu.Close();
+        _srcMenu.KeyDown += (_, e) => { if (e.KeyCode == Keys.Escape) _srcMenu.Close(); };
         _srcMenu.Opening += (_, _) => RebuildSourceMenu();
         _btnSources.Click += (_, _) =>
         {
@@ -983,9 +988,11 @@ internal sealed class MainForm : Form
             }
 
             var useSeed = sorting == "random" ? _seed : null;
-            Logger.Info($"load: key={_currentChannelKey} cat={ch.Category} purity={purity} q=\"{ch.Query}\" page={_page} seed=\"{useSeed}\"");
+            var kw = (ch.Query ?? "").Replace("+", " ").Trim();
+            Logger.Info($"load: key={_currentChannelKey} cat={ch.Category} purity={purity} q=\"{ch.Query}\" kw=\"{kw}\" page={_page} seed=\"{useSeed}\"");
 
-            // v1.4.0：多源聚合。壁纸源决定「从哪来」，频道树只对 wallhaven 生效。
+            // v1.4.0：多源聚合。壁纸源决定「从哪来」；v1.4.1 起频道对非 wallhaven 源也生效：
+            // WhQuery 保留 +tag 语法给 wallhaven，Keywords（去 + 号）传给支持检索的源。
             var list = await _sources.FetchMergedAsync(_cfg, new SourceFetchRequest
             {
                 Page = _page,
@@ -993,6 +1000,8 @@ internal sealed class MainForm : Form
                 Seed = useSeed,
                 WhCategory = ch.Category,
                 WhQuery = ch.Query,
+                Keywords = kw,
+                ChannelKey = _currentChannelKey ?? "",
                 Purity = purity,
                 Sorting = sorting
             });
