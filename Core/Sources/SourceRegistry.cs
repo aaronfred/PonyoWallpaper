@@ -16,9 +16,9 @@ internal sealed class SourceRegistry
 
     /// <summary>
     /// 默认启用的源。
-    /// v1.5.0：只默认启用<b>免注册且国内直连可达</b>的两个源，保证开箱即出图；
-    /// wallhaven 需代理（国内直连不可达），保留在源菜单里由用户按需勾选，
-    /// 默认启用它会让合并加载被最慢的源拖到几十秒。
+    /// v1.5.1：只默认启用<b>免注册且国内直连稳定</b>的两个源，保证开箱即有图；
+    /// wallhaven（需代理）与 github（图库在 GitHub，取图走 jsDelivr/代理链路，
+    /// 实测国内时快时断）都保留在源菜单里由用户按需勾选。
     /// </summary>
     public static readonly string[] DefaultEnabled = { "qh360", "wallpapercave" };
 
@@ -32,6 +32,7 @@ internal sealed class SourceRegistry
             new WallhavenSource(client),
             new Qh360Source(),
             new WallpaperCaveSource(),
+            new GitHubWallsSource(),
         };
         foreach (var s in _all) _byKey[s.Key] = s;
     }
@@ -39,7 +40,7 @@ internal sealed class SourceRegistry
     public IReadOnlyList<IWallpaperSource> All => _all;
 
     /// <summary>全部已注册源 key（静态表，供配置迁移用）。</summary>
-    private static readonly string[] AllKeys = { "wallhaven", "qh360", "wallpapercave" };
+    private static readonly string[] AllKeys = { "wallhaven", "qh360", "wallpapercave", "github" };
 
     /// <summary>
     /// 配置迁移（启动时调用一次）：

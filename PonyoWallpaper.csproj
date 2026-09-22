@@ -9,7 +9,7 @@
     <ApplicationIcon>resources\ponyo.ico</ApplicationIcon>
     <RootNamespace>PonyoWallpaper</RootNamespace>
     <AssemblyName>PonyoWallpaper</AssemblyName>
-    <Version>1.5.0</Version>
+    <Version>1.5.1</Version>
     <!-- 对外显示名统一为「Ponyo壁纸」（AssemblyName / 数据目录 / 互斥体名保持不变，兼容已有安装） -->
     <Product>Ponyo壁纸</Product>
     <Company>Ponyo壁纸</Company>
@@ -25,6 +25,13 @@
     <!-- 常驻托盘低分配场景：关后台 GC + GC 节省内存档位（上限 5），以轻微 CPU 换更低工作集 -->
     <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- _verify 下放着探测/测试脚本（含独立的 wictest 小工程），不能参与主工程编译 -->
+    <Compile Remove="_verify\**" />
+    <None Remove="_verify\**" />
+    <EmbeddedResource Remove="_verify\**" />
+  </ItemGroup>
 
   <ItemGroup>
     <RuntimeHostConfigurationOption Include="System.GC.Conserve" Value="5" />

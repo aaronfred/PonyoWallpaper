@@ -31,6 +31,7 @@ internal sealed class WallpaperItem
             "wallhaven"     => "WH",
             "qh360"         => "360",
             "wallpapercave" => "WCV",
+            "github"        => "GH",
             "wallhalla"     => "WL",
             "bing"          => "Bing",
             "unsplash"      => "UN",
