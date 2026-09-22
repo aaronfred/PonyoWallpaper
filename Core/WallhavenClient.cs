@@ -17,18 +17,17 @@ internal sealed class WallhavenClient : IDisposable
     private DateTime _lastRequest = DateTime.MinValue;
     private static readonly TimeSpan MinInterval = TimeSpan.FromMilliseconds(1500); // 40/min
 
-    // —— 统一请求链路（粘性轮换，按优先级排列）：直连 → 反代 → 用户代理 → 公共池 ——
+    // —— 统一请求链路（粘性轮换，按优先级排列）：直连 → 反代 → 用户代理 ——
+    // （v1.4.2 公共代理池管理已拆分至独立工具 ProxyToolkit，本链路不再包含公共池）
     // 每个条目是一级；失败切换到下一级，成功后保持（回绕时从头重试，按用户要求直连最优先）。
     private enum EntryKind { Direct, Mirror, DefaultMirror, Proxy }
     private readonly List<(EntryKind Kind, string Url, string? User, string? Pass)> _chain = new();
     private List<string> _userRaw = new();
-    private List<string> _publicRaw = new();
     private List<string> _mirrorRaw = new();
     private bool _usingDefaultMirror;   // 用户未填反代 → 链路用内置默认反代（隐藏地址）
     private string? _poolUser;
     private string? _poolPass;
     private int _chainIdx;
-    private int _userCount;
     // 手填代理（v1.2.0）：锁定后链路只用它，不自动优选、不静默降级
     private string _manualProxy = "";
     private bool _manualLocked;
@@ -84,7 +83,7 @@ internal sealed class WallhavenClient : IDisposable
     /// <summary>当前链路是否使用内置默认反代（设置页据此显示「当前使用默认代理」提示）。</summary>
     public bool UsingDefaultMirror => Current().Kind == EntryKind.DefaultMirror;
 
-    /// <summary>当前在用层级：直连 / 反代 / 用户代理 / 公共池 / 手填代理（锁定）。</summary>
+    /// <summary>当前在用层级：直连 / 反代 / 默认代理 / 用户代理 / 手填代理（锁定）。</summary>
     public string ActiveTier
     {
         get
@@ -95,7 +94,7 @@ internal sealed class WallhavenClient : IDisposable
                 EntryKind.Direct => "直连",
                 EntryKind.DefaultMirror => "默认代理",
                 EntryKind.Mirror => "反代",
-                _ => _chainIdx < _userCount ? "用户代理" : "公共池"
+                _ => "用户代理"
             };
         }
     }
@@ -130,14 +129,6 @@ internal sealed class WallhavenClient : IDisposable
             .Where(s => !string.IsNullOrWhiteSpace(s)).Select(s => s.Trim()).ToList();
         _poolUser = string.IsNullOrWhiteSpace(user) ? null : user.Trim();
         _poolPass = pass;
-        RebuildChain();
-    }
-
-    /// <summary>设置公共代理池（自动探测产出，程序自管理）。设置后立即应用到链路。</summary>
-    public void SetPublicProxies(IEnumerable<string>? urls)
-    {
-        _publicRaw = (urls ?? Array.Empty<string>())
-            .Where(s => !string.IsNullOrWhiteSpace(s)).Select(s => s.Trim()).ToList();
         RebuildChain();
     }
 
@@ -187,7 +178,7 @@ internal sealed class WallhavenClient : IDisposable
         return best;
     }
 
-    /// <summary>重建统一链路：直连 → 反代 → 用户代理（行内嵌账密优先，其次全局账密）→ 公共池。</summary>
+    /// <summary>重建统一链路：直连 → 反代 → 用户代理（行内嵌账密优先，其次全局账密）。</summary>
     private void RebuildChain()
     {
         _chain.Clear();
@@ -205,7 +196,6 @@ internal sealed class WallhavenClient : IDisposable
                 Logger.Warn($"manual proxy invalid '{_manualProxy}': {ex.Message}");
                 _chain.Add((EntryKind.Direct, "", null, null));
             }
-            _userCount = _chain.Count;
             if (_chainIdx >= _chain.Count) _chainIdx = 0;
             var oldM = _http;
             _http = BuildClient();
@@ -226,21 +216,11 @@ internal sealed class WallhavenClient : IDisposable
             }
             catch (Exception ex) { Logger.Warn($"proxy line invalid '{line}': {ex.Message}"); }
         }
-        _userCount = _chain.Count - 1; // 减去直连
-        foreach (var line in _publicRaw)
-        {
-            try
-            {
-                var (url, u, p) = ParseProxyCredentials(line, null, null);
-                _chain.Add((EntryKind.Proxy, url, u, p));
-            }
-            catch (Exception ex) { Logger.Warn($"public proxy invalid '{line}': {ex.Message}"); }
-        }
         if (_chainIdx >= _chain.Count) _chainIdx = 0;
         var old = _http;
         _http = BuildClient();
         // 注意：不要打印 _mirrorRaw 内容——默认反代地址不外泄，只报是否在用默认
-        Logger.Info($"request chain rebuilt: direct + mirror {_mirrorRaw.Count}{( _usingDefaultMirror ? "(默认)" : "")} + user {_userRaw.Count} + public {_publicRaw.Count}; active = {ActiveProxyName}");
+        Logger.Info($"request chain rebuilt: direct + mirror {_mirrorRaw.Count}{( _usingDefaultMirror ? "(默认)" : "")} + user {_userRaw.Count}; active = {ActiveProxyName}");
         try { old.Dispose(); } catch { }
     }
 
@@ -284,53 +264,6 @@ internal sealed class WallhavenClient : IDisposable
         _http = BuildClient();
         try { old.Dispose(); } catch { }
         Logger.Info($"request chain failover -> {ActiveProxyName}");
-    }
-
-    /// <summary>
-    /// 优选代理：从【现有】链路条目（直连 / 反代 / 用户代理 / 公共池）中并发实测，
-    /// 选出真正能访问 wallhaven 且延迟最低的一级并立即切换为在用（不抓取任何新源）。
-    /// 返回（名称, 延迟毫秒）；全部不可用返回 null。
-    /// </summary>
-    public async Task<(string Name, int Ms)?> PickBestAsync(Action<string>? log = null)
-    {
-        var entries = new List<(int Idx, string Kind, string Url, string? User, string? Pass)>();
-        for (var i = 0; i < _chain.Count; i++)
-        {
-            var e = _chain[i];
-            // 内置默认反代不参与优选：它是全用户的兜底资源，不该被"竞速/切换"反复压测，
-            // 也不该被选出来当作最快链路（避免把公共资源当成用户的私有优选结果）。
-            if (e.Kind == EntryKind.DefaultMirror) continue;
-            var kind = e.Kind switch
-            {
-                EntryKind.Direct => "direct",
-                EntryKind.Mirror => "mirror",
-                _ => "proxy"
-            };
-            entries.Add((i, kind, e.Url, e.User, e.Pass));
-        }
-
-        // 用户没配任何自己的链路时，候选集为空 → 说明当前只能靠默认代理，直接保持不动
-        if (entries.Count == 0)
-        {
-            log?.Invoke("没有可优选的链路（当前使用默认代理）");
-            return null;
-        }
-
-        var best = await ProxyTester.ProbeChainAsync(entries, 12, log);
-        if (best.Count == 0)
-        {
-            // 其他链路都不可用 → 保持现状（若正用默认代理则继续用它）
-            if (UsingDefaultMirror) log?.Invoke("其他链路均不可用，继续使用默认代理");
-            return null;
-        }
-
-        _chainIdx = best[0].Idx;
-        var old = _http;
-        _http = BuildClient();
-        try { old.Dispose(); } catch { }
-        var name = ActiveTier + " - " + ActiveProxyName;
-        Logger.Info($"pick best -> {name} ({best[0].Ms}ms)");
-        return (name, best[0].Ms);
     }
 
     public WallhavenClient(string apiKey = "", string? proxyUrl = null,

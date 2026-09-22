@@ -47,26 +47,28 @@ internal class AppConfig
     public string ProxyUrl { get; set; } = "";
 
     /// <summary>
-    /// 用户代理池（每行一个：scheme://host:port，支持行内嵌 user:pass@；空 = 未配置，走公共池）。
-    /// 粘性策略：成功的代理保持使用，失败自动切换。用户代理识别成功后优先于公共池。首项与 ProxyUrl 保持一致（兼容旧字段）。
+    /// 用户代理池（每行一个：scheme://host:port，支持行内嵌 user:pass@；空 = 未配置）。
+    /// v1.4.2 起 UI 已拆分至独立工具 ProxyToolkit；此字段保留以兼容已有配置（旧值继续生效）。
     /// </summary>
     public List<string>? ProxyUrls { get; set; }
 
     /// <summary>
-    /// 公共代理池源地址。行格式：&lt;协议&gt;|&lt;列表URL&gt;（如 socks5|https://…），空 = 内置默认源。
+    /// （v1.4.2 拆分至 ProxyToolkit，仅保留字段兼容旧 JSON；本程序不再读写）
     /// </summary>
     public List<string>? ProxySourceUrls { get; set; }
 
     /// <summary>
     /// 每个代理源的连续失败次数（v1.2.0）。成功一次即清零；达到 3 次则从 ProxySourceUrls 中剔除。
-    /// 用于避免每次更新都去请求已经死掉的源。
+    /// （v1.4.2 拆分至 ProxyToolkit，仅保留字段兼容旧 JSON；本程序不再读写）
     /// </summary>
     public Dictionary<string, int>? ProxySourceFails { get; set; }
 
-    /// <summary>公共代理池（自动探测产出，程序自管理，只读展示）。默认首次启动后台探测。</summary>
+    /// <summary>公共代理池（自动探测产出）。
+    /// （v1.4.2 拆分至 ProxyToolkit，仅保留字段兼容旧 JSON；本程序不再读写）</summary>
     public List<string>? PublicProxyUrls { get; set; }
 
-    /// <summary>公共代理池上次更新时间（超过 45 分钟或池内不足 3 个自动刷新）。</summary>
+    /// <summary>公共代理池上次更新时间。
+    /// （v1.4.2 拆分至 ProxyToolkit，仅保留字段兼容旧 JSON；本程序不再读写）</summary>
     public DateTime? PublicProxyUpdatedAt { get; set; }
 
     /// <summary>
@@ -98,8 +100,7 @@ internal class AppConfig
     public bool ManualProxyLocked { get; set; } = false;
 
     /// <summary>
-    /// 公共代理池扫描模式：quiet（默认，16 并发仅手动触发）/ normal / aggressive / off。
-    /// 见 docs/v1.2.0-优化方案.md 2.5.2：企业环境避免主动外连大量代理节点。
+    /// 公共代理池扫描模式（v1.4.2 拆分至 ProxyToolkit，仅保留字段兼容旧 JSON；本程序不再读写）。
     /// </summary>
     public string ProxyScanMode { get; set; } = "quiet";
 
@@ -187,7 +188,9 @@ internal class AppConfig
         }
 
         // 迁移：旧版只保存了单条内置主源 → 清空，回落内置多源（3 个）+ 内置加速地址
-        if (cfg.HostsSourceUrls is { Count: 1 } && cfg.HostsSourceUrls[0] == HostsUpdater.DefaultSourceUrl)
+        // （v1.4.2 hosts 管理已拆分至 ProxyToolkit，此处仅做旧配置一次性清理）
+        if (cfg.HostsSourceUrls is { Count: 1 } &&
+            cfg.HostsSourceUrls[0] == "https://raw.githubusercontent.com/oopsunix/hosts/main/hosts_wallhaven")
         {
             cfg.HostsSourceUrls = null;
             cfg.HostsAccelUrls = null;

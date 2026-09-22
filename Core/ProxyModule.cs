@@ -5,7 +5,8 @@ namespace PonyoWallpaper;
 /// <summary>
 /// 代理独立模块（无 UI 依赖，可被其他程序直接复用/集成）：
 /// - 规则层：需代理的网址（域名后缀匹配），默认 wallhaven 三域名（主站 + 缩略图/原图子域），可配置
-/// - 链路层：直连 → 反代 → 用户代理 → 公共池（运行状态在 WallhavenClient，配置来源 AppConfig）
+/// - 链路层：直连 → 反代 → 用户代理（运行状态在 WallhavenClient，配置来源 AppConfig；
+///   v1.4.2 起公共代理池管理拆分至独立工具 ProxyToolkit，链路不再含公共池）
 /// - 集成入口（其他程序只需引用本文件 + AppConfig 的代理字段即可）：
 ///     ProxyModule.NeedProxy(url, cfg)   —— 判断某 URL 是否命中代理规则（域名后缀匹配）
 ///     ProxyModule.Route(url, cfg)       —— 路由决策（是否走代理链路 + 说明）
@@ -52,20 +53,18 @@ internal static class ProxyModule
     /// <summary>路由决策：返回（是否走代理链路, 说明文字）。</summary>
     public static (bool Need, string Reason) Route(string url, AppConfig cfg)
         => NeedProxy(url, cfg)
-            ? (true, "命中代理规则 → 链路（直连/反代/用户代理/公共池）")
+            ? (true, "命中代理规则 → 链路（直连/反代/用户代理）")
             : (false, "未命中代理规则 → 直连");
 
-    /// <summary>当前代理配置快照（JSON）：规则 + 反代 + 用户池 + 公共池，供其他程序集成时读取。</summary>
+    /// <summary>当前代理配置快照（JSON）：规则 + 反代 + 用户池，供其他程序集成时读取。</summary>
     public static string Snapshot(AppConfig cfg)
     {
         var snap = new
         {
-            chain = new[] { "direct", "mirror", "user-proxy", "public-pool" },
+            chain = new[] { "direct", "mirror", "user-proxy" },
             proxiedHosts = Hosts(cfg),
             mirrors = cfg.CfProxyUrls ?? new List<string>(),
             userProxies = cfg.ProxyUrls ?? new List<string>(),
-            publicPool = cfg.PublicProxyUrls ?? new List<string>(),
-            publicPoolUpdatedAt = cfg.PublicProxyUpdatedAt,
         };
         return JsonSerializer.Serialize(snap, new JsonSerializerOptions { WriteIndented = true });
     }

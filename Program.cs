@@ -5,36 +5,7 @@ internal static class Program
     [STAThread]
     static void Main(string[] args)
     {
-        // 提权进程入口：应用 hosts 后立即退出（弹窗反馈结果）
-        if (args.Length >= 2 && args[0] == "--apply-hosts")
-        {
-            var tmpPath = args[1].Trim('"');
-            var ok = false;
-            try
-            {
-                if (File.Exists(tmpPath))
-                {
-                    ok = HostsUpdater.Apply(File.ReadAllText(tmpPath));
-                    File.Delete(tmpPath);
-                }
-            }
-            catch { /* 静默 */ }
-            MessageBox.Show(ok ? "hosts 已更新并刷新 DNS 缓存" : "hosts 更新失败，详见日志",
-                ok ? "完成" : "错误", MessageBoxButtons.OK,
-                ok ? MessageBoxIcon.Information : MessageBoxIcon.Error);
-            return;
-        }
-
-        // 提权进程入口：移除 hosts 映射后立即退出（弹窗反馈结果）
-        if (args.Length >= 1 && args[0] == "--remove-hosts")
-        {
-            var ok = false;
-            try { ok = HostsUpdater.Remove(); } catch { /* 静默 */ }
-            MessageBox.Show(ok ? "已移除本程序写入的 wallhaven hosts 段（其他条目未改动）" : "移除失败，详见日志",
-                ok ? "完成" : "错误", MessageBoxButtons.OK,
-                ok ? MessageBoxIcon.Information : MessageBoxIcon.Error);
-            return;
-        }
+        // （v1.4.2）hosts 提权入口已随 hosts 管理拆分至独立工具 ProxyToolkit，此入口移除
 
         // 代理模块集成演示：输出配置快照（JSON）+ 规则命中自检，供其他程序参考接入方式
         if (args.Length >= 1 && args[0] == "--proxy-snapshot")
@@ -65,9 +36,6 @@ internal static class Program
                 using var api = new WallhavenClient(cfg.ApiKey, cfg.ProxyUrl, cfg.ProxyUser, cfg.ProxyPassword, cfg.ProxyUrls);
                 api.SetMirrors(cfg.CfProxyUrls);
                 var cache = new CacheManager(AppPaths.CacheFullDir, AppPaths.CacheThumbDir, cfg.CacheLimitMb);
-                // 用户代理为空（默认态）或公共池过期时，先自动探测公共代理池再测试，
-                // 使自检不依赖任何手动配置
-                ProxyTester.EnsurePublicPoolAsync(cfg, api).GetAwaiter().GetResult();
                 var engine = new RotationEngine(cfg, api, cache);
                 var item = engine.NextAsync().GetAwaiter().GetResult();
                 Logger.Info($"test-rotate => {(item == null ? "FAIL" : "OK " + item.Id + " " + item.Resolution)}");
@@ -151,29 +119,8 @@ internal static class Program
             var favorites = new ListStore(AppPaths.FavoritesFile);
             var blacklist = new ListStore(AppPaths.BlacklistFile);
 
-            // v1.2.0：代理扫描默认 Quiet（不自动外连大量代理节点，避免企业网络告警），仅手动触发。
-            // 唯一例外：完全没有任何可用链路时自动跑一次，保证开箱可用。
-            // v1.3.0：内置默认反代（隐藏）始终存在 → 开箱即有链路，该例外实际不再触发。
-            // 模式见 docs/v1.2.0-优化方案.md 2.5.2：off / quiet(默认) / normal / aggressive
-            var scanMode = (cfg.ProxyScanMode ?? "quiet").ToLowerInvariant();
-            var hasAnyLink = true;   // 内置默认反代兜底：任何情况下都至少有一条可用链路
-            var poolEmpty = (cfg.PublicProxyUrls?.Count ?? 0) == 0;
-            var autoScan = scanMode is "normal" or "aggressive"
-                           || (scanMode != "off" && !hasAnyLink && poolEmpty);
-            if (autoScan)
-            {
-                Logger.Info($"public pool auto scan (mode={scanMode}, firstRunNoLink={!hasAnyLink && poolEmpty})");
-                _ = ProxyTester.EnsurePublicPoolAsync(cfg, api);
-            }
-            // 免费代理寿命以小时计：每 6 小时后台保活一次（仅 normal/aggressive 自动执行；quiet/off 需手动）
-            using var poolKeepAlive = new System.Threading.Timer(
-                _ =>
-                {
-                    if (scanMode is not ("normal" or "aggressive")) return;
-                    try { ProxyTester.EnsurePublicPoolAsync(cfg, api).GetAwaiter().GetResult(); } catch { /* 静默 */ }
-                },
-                null, TimeSpan.FromHours(6), TimeSpan.FromHours(6));
-
+            // v1.4.2：公共代理池的抓取/保活/扫描模式已随代理管理拆分至独立工具 ProxyToolkit。
+            // 本程序链路固定为：直连 → 反代（自定义或内置默认）→ 手填代理，开箱即有可用链路。
             using var mainForm = new MainForm(cfg, api, cache, engine, history, favorites, blacklist);
             ThemeManager.Apply(mainForm, ThemeManager.ShouldUseDark(cfg.Theme));
             using var tray = new TrayIcon();
