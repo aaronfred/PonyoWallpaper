@@ -12,8 +12,8 @@ namespace PonyoWallpaper;
 ///      因为未认证的 GitHub API 只有 60 次/小时，不能让每次翻页都去打接口）；
 ///   2) 只保留 <b>.jpg/.jpeg/.png</b> —— 与程序现有 GDI+ 管线完全兼容，
 ///      且严格符合「轻量化」原则：不引入任何 webp/avif 解码依赖（本机 WIC 也无 webp codec）；
-///   3) 走 jsDelivr 免费 CDN 取图（国内直连可达，实测 cdn/gcore 双域名可用），
-///      不消耗 GitHub 的 raw 流量，也不需要 Token。
+///   3) 取图走 <see cref="CdnMirror"/> 展开的多条等价链路（raw / ghproxy / jsDelivr / gh-proxy），
+///      任一跳通了即用 —— v1.5.2 起单条链路抖动不再导致整片卡片空白。
 ///
 /// 频道映射：仓库的<b>目录名</b>与频道关键词做包含匹配（如 anime/nature/city/space/minimal…），
 /// 命中则只出该目录的图；无命中时退回该仓库全部图片。
@@ -44,7 +44,7 @@ internal sealed class GitHubWallsSource : IWallpaperSource
     public string DisplayName => "GitHub 图库";
     public bool NeedsApiKey => false;
     public bool IsReady(AppConfig cfg) => true;
-    public string StatusText(AppConfig cfg) => "需国际线路 · 仅 jpg/png";
+    public string StatusText(AppConfig cfg) => "免注册 · 多链路取图 · 仅 jpg/png";
 
     public async Task<IReadOnlyList<WallpaperItem>?> FetchAsync(AppConfig cfg, SourceFetchRequest req, CancellationToken ct)
     {
@@ -55,7 +55,7 @@ internal sealed class GitHubWallsSource : IWallpaperSource
 
             foreach (var (repo, branch, _) in Repos)
             {
-                var files = await GetManifestAsync(repo, branch, ct);
+                var files = await GetManifestAsync(repo, branch, cfg, ct);
                 if (files == null || files.Count == 0) continue;
 
                 var picked = 0;
@@ -100,13 +100,14 @@ internal sealed class GitHubWallsSource : IWallpaperSource
             var list = new List<WallpaperItem>();
             foreach (var (repo, branch, path, dir) in slice)
             {
-                var url = RawCdn(repo, branch, path);
+                var url = RawUrl(repo, branch, path);
                 list.Add(new WallpaperItem
                 {
                     SourceKey = Key,
                     Id = $"{repo.Split('/')[1]}/{path}",      // 稳定唯一（含仓库名，避免跨仓同名）
                     Path = url,
-                    Thumb = url,                               // jsDelivr 不做缩放，缩略图复用原图（首次即缓存，点“设为壁纸”时无需再下）
+                    Thumb = url,                               // 原图直链：缩略图与设为壁纸共用，
+                                                               // 下载侧会按 CdnMirror 展开多条镜像链路
                     Resolution = "",
                     Category = dir,
                     Purity = "sfw",
@@ -179,18 +180,19 @@ internal sealed class GitHubWallsSource : IWallpaperSource
         return i > 0 ? path[..i] : "";
     }
 
-    /// <summary>jsDelivr CDN 直链（免费、无需 Token、国内可达）。</summary>
-    private static string RawCdn(string repo, string branch, string path)
-    {
-        var segs = path.Split('/').Select(Uri.EscapeDataString);
-        return $"https://cdn.jsdelivr.net/gh/{repo}@{branch}/{string.Join("/", segs)}";
-    }
+    /// <summary>
+    /// GitHub raw 直链 —— 只作 <b>标识</b> 用：真正下载时由 <see cref="CdnMirror"/> 展开为
+    /// raw / ghproxy / jsDelivr / gh-proxy 多条等价链路，逐条快速失败重试（见 <see cref="SourceHttp"/>）。
+    /// </summary>
+    private static string RawUrl(string repo, string branch, string path)
+        => $"https://raw.githubusercontent.com/{repo}/{branch}/{path}";
 
     /// <summary>
     /// 取仓库文件清单。优先用本地缓存（24h TTL），再退进程内缓存，最后才打 GitHub API
     /// —— 未认证只有 60 次/小时，绝不能每次翻页都请求。
     /// </summary>
-    private static async Task<List<string>?> GetManifestAsync(string repo, string branch, CancellationToken ct)
+    private static async Task<List<string>?> GetManifestAsync(string repo, string branch, AppConfig cfg,
+        CancellationToken ct)
     {
         var key = $"{repo}@{branch}";
         lock (CacheLock)
@@ -216,13 +218,12 @@ internal sealed class GitHubWallsSource : IWallpaperSource
         try
         {
             var url = $"https://api.github.com/repos/{repo}/git/trees/{branch}?recursive=1";
-            using var resp = await SourceHttp.Get().GetAsync(url, ct);
-            if (!resp.IsSuccessStatusCode)
+            var json = await SourceHttp.GetStringAsync(url, cfg, ct);
+            if (string.IsNullOrEmpty(json))
             {
-                Logger.Warn($"github: tree {repo} -> {(int)resp.StatusCode} (可能触及 API 限流 60/h)");
+                Logger.Warn($"github: tree {repo} 取不到（GitHub API 限流 60/h 或链路不可达）");
                 return null;
             }
-            var json = await resp.Content.ReadAsStringAsync(ct);
             var tree = JsonSerializer.Deserialize<GitTree>(json);
             var files = tree?.Tree?
                 .Where(t => string.Equals(t.Type, "blob", StringComparison.OrdinalIgnoreCase))

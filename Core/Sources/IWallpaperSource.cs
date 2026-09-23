@@ -53,23 +53,3 @@ internal interface IWallpaperSource
     /// <summary>取一页。返回 null = 该源本次失败（调用方跳过，不影响其他源）；空列表 = 没有更多。</summary>
     Task<IReadOnlyList<WallpaperItem>?> FetchAsync(AppConfig cfg, SourceFetchRequest req, CancellationToken ct);
 }
-
-/// <summary>各源共用的轻量 HTTP 客户端（静态复用，避免每源一个 HttpClient 造成的端口与句柄压力）。</summary>
-internal static class SourceHttp
-{
-    private static readonly HttpClient Client = CreateClient();
-
-    private static HttpClient CreateClient()
-    {
-        var h = new HttpClient(new HttpClientHandler { AutomaticDecompression = System.Net.DecompressionMethods.All })
-        {
-            Timeout = TimeSpan.FromSeconds(25)
-        };
-        h.DefaultRequestHeaders.UserAgent.ParseAdd(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
-        h.DefaultRequestHeaders.TryAddWithoutValidation("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8");
-        return h;
-    }
-
-    public static HttpClient Get() => Client;
-}

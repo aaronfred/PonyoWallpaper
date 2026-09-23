@@ -458,7 +458,7 @@ internal sealed class MainForm : Form
 
         RebuildRotationMenu();
         UpdateSourceButtonText();
-        _tips.SetToolTip(_btnSources, "点击展开壁纸源多选列表，可同时勾选多个；勾选即时生效并重新加载\n360 壁纸：国内免注册，按频道映射到自家 18 个分类\nWallpaperCave：国际免注册，按频道关键词检索专辑，只出电脑横屏壁纸\nwallhaven：需代理，频道分类最全（23 频道）\nGitHub 图库：开源壁纸仓库（约 4 千张，按目录分类），需较快国际线路，国内时快时断");
+        _tips.SetToolTip(_btnSources, "点击展开壁纸源多选列表，可同时勾选多个；勾选即时生效并重新加载\n360 壁纸：国内免注册，按频道映射到自家 18 个分类\nWallpaperCave：国际免注册，按频道关键词检索专辑，只出电脑横屏壁纸\nGitHub 图库：开源壁纸仓库（约 4 千张，按目录分类），取图自动走多条公共镜像/反代\nwallhaven：需代理，频道分类最全（23 频道）");
         return row;
     }
 
@@ -1207,13 +1207,24 @@ internal sealed class MainForm : Form
             {
                 var url = card.Item.Thumb;
                 if (string.IsNullOrEmpty(url)) return;
-                url = WallhavenClient.RewriteForThumbs(url);
                 var dir = Path.GetDirectoryName(thumbPath)!;
                 Directory.CreateDirectory(dir);
-                using var resp = await _thumbHttp.GetAsync(url);
-                resp.EnsureSuccessStatusCode();
-                await using var fs = File.Create(thumbPath);
-                await resp.Content.CopyToAsync(fs);
+
+                if (url.Contains("wallhaven", StringComparison.OrdinalIgnoreCase))
+                {
+                    // wallhaven：走它自己的反代改写 + 缩略图客户端（反代链路只对 th./w. 子域有意义）
+                    using var resp = await _thumbHttp.GetAsync(WallhavenClient.RewriteForThumbs(url));
+                    resp.EnsureSuccessStatusCode();
+                    await using var fs = File.Create(thumbPath);
+                    await resp.Content.CopyToAsync(fs);
+                }
+                else
+                {
+                    // 其他源（360 / WallpaperCave / GitHub 图库）：走通用链路
+                    // —— 直连 → 镜像候选 → 手填代理，每跳硬超时，失败静默保持占位
+                    if (!await SourceHttp.DownloadToAsync(url, thumbPath, _cfg))
+                        return;
+                }
             }
             // 用字节流构造图片：避免 Image.FromFile 长期锁定缓存文件（否则 LRU 淘汰时删不掉）
             byte[] bytes = await File.ReadAllBytesAsync(thumbPath);

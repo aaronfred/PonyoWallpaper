@@ -114,6 +114,7 @@ internal static class Program
             var api = new WallhavenClient(cfg.ApiKey, cfg.ProxyUrl, cfg.ProxyUser, cfg.ProxyPassword, cfg.ProxyUrls);
             api.SetMirrors(cfg.CfProxyUrls); // CF 反代：启用后对应链路直连反代
             api.SetManualProxy(cfg.ManualProxy, cfg.ManualProxyLocked); // v1.2.0：手填代理锁定（重启后保持）
+            api.AttachConfig(cfg);           // v1.5.2：非 wallhaven 资源下载走通用链路（镜像 + 代理）
             var cache = new CacheManager(AppPaths.CacheFullDir, AppPaths.CacheThumbDir, cfg.CacheLimitMb);
             var engine = new RotationEngine(cfg, api, cache);
             var history = new HistoryStore();

@@ -16,11 +16,11 @@ internal sealed class SourceRegistry
 
     /// <summary>
     /// 默认启用的源。
-    /// v1.5.1：只默认启用<b>免注册且国内直连稳定</b>的两个源，保证开箱即有图；
-    /// wallhaven（需代理）与 github（图库在 GitHub，取图走 jsDelivr/代理链路，
-    /// 实测国内时快时断）都保留在源菜单里由用户按需勾选。
+    /// v1.5.2：github 重新纳入默认 —— 取图已改为「镜像候选 + 手填代理」多链路失败降级
+    /// （<see cref="CdnMirror"/> + <see cref="SourceHttp"/>），不再出现 v1.5.1 的整片空白；
+    /// wallhaven 仍需代理（国内直连不可达），保留在源菜单由用户按需勾选。
     /// </summary>
-    public static readonly string[] DefaultEnabled = { "qh360", "wallpapercave" };
+    public static readonly string[] DefaultEnabled = { "qh360", "wallpapercave", "github" };
 
     /// <summary>单源超时：避免某个慢源/不可达源拖垮整页加载（合并是等所有源返回的）。</summary>
     private static readonly TimeSpan PerSourceTimeout = TimeSpan.FromSeconds(12);

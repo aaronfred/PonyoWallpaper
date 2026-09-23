@@ -275,6 +275,16 @@ internal sealed class WallhavenClient : IDisposable
             ? Array.Empty<string>() : new[] { proxyUrl }), proxyUser, proxyPassword);
     }
 
+    // —— v1.5.2：非 wallhaven 资源的下载改走通用链路（镜像候选 + 手填代理），需要读配置 ——
+    private AppConfig? _cfg;
+
+    /// <summary>注入配置：非 wallhaven 源（360 / WallpaperCave / GitHub 图库）的取图需要它读代理设置。</summary>
+    public void AttachConfig(AppConfig cfg) => _cfg = cfg;
+
+    /// <summary>是否 wallhaven 系资源（决定走它自己的反代链路还是通用链路）。</summary>
+    private static bool IsWallhavenUrl(string url)
+        => url.Contains("wallhaven", StringComparison.OrdinalIgnoreCase);
+
     /// <summary>按当前链路条目改写 URL：反代条目（含内置默认反代）→ 反代地址；其余原样。</summary>
     private string PrepareUrl(string raw)
         => IsMirror(Current()) ? RewriteWith(raw, Current().Url) : raw;
@@ -420,6 +430,15 @@ internal sealed class WallhavenClient : IDisposable
 
     public async Task DownloadAsync(string url, string destPath, CancellationToken ct = default)
     {
+        // v1.5.2：非 wallhaven 资源（360 / WallpaperCave / GitHub 图库）走通用链路 ——
+        // CdnMirror 展开多条等价镜像 + 手填代理，逐条硬超时快速失败；
+        // 关键是<b>不动 wallhaven 的链路状态</b>（不再让非 wallhaven 的失败去 RotateProxy 污染全局链路索引）。
+        if (!IsWallhavenUrl(url) && _cfg != null)
+        {
+            if (await SourceHttp.DownloadToAsync(url, destPath, _cfg, ct)) return;
+            // 全链路失败：继续走下面的直连重试，保持对旧行为的兜底
+        }
+
         for (int attempt = 0; attempt < 3; attempt++)
         {
             try

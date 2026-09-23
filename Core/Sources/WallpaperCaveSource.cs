@@ -81,7 +81,7 @@ internal sealed class WallpaperCaveSource : IWallpaperSource
             // 频道 → 检索词（逐频道单关键词表；实测单词召回远好于双词组合）
             var term = ResolveTerm(req);
 
-            var albums = await SearchAlbumsAsync(term, ct);
+            var albums = await SearchAlbumsAsync(term, cfg, ct);
             if (albums.Count == 0)
             {
                 Logger.Warn($"wallpapercave: no album for '{term}'");
@@ -92,7 +92,7 @@ internal sealed class WallpaperCaveSource : IWallpaperSource
             var page = Math.Max(1, req.Page);
             var album = albums[(page - 1) % albums.Count];
 
-            var items = await FetchAlbumAsync(album.Slug, album.Title, ct);
+            var items = await FetchAlbumAsync(album.Slug, album.Title, cfg, ct);
             if (items == null) return null;
 
             var landscape = items.Where(i => i.Landscape).ToList();
@@ -113,12 +113,12 @@ internal sealed class WallpaperCaveSource : IWallpaperSource
     }
 
     /// <summary>搜索专辑列表（服务端渲染 HTML）。</summary>
-    private static async Task<List<(string Slug, string Title)>> SearchAlbumsAsync(string term, CancellationToken ct)
+    private static async Task<List<(string Slug, string Title)>> SearchAlbumsAsync(string term, AppConfig cfg,
+        CancellationToken ct)
     {
         var url = $"{Base}/search?q={Uri.EscapeDataString(term)}";
-        using var resp = await SourceHttp.Get().GetAsync(url, ct);
-        if (!resp.IsSuccessStatusCode) return new List<(string, string)>();
-        var html = await resp.Content.ReadAsStringAsync(ct);
+        var html = await SourceHttp.GetStringAsync(url, cfg, ct);
+        if (string.IsNullOrEmpty(html)) return new List<(string, string)>();
 
         var albums = new List<(string, string)>();
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -137,11 +137,11 @@ internal sealed class WallpaperCaveSource : IWallpaperSource
     }
 
     /// <summary>解析专辑页的全部条目（含宽高，用于横竖屏判定）。</summary>
-    private async Task<List<WallpaperItem>?> FetchAlbumAsync(string slug, string albumTitle, CancellationToken ct)
+    private async Task<List<WallpaperItem>?> FetchAlbumAsync(string slug, string albumTitle, AppConfig cfg,
+        CancellationToken ct)
     {
-        using var resp = await SourceHttp.Get().GetAsync(Base + slug, ct);
-        if (!resp.IsSuccessStatusCode) return null;
-        var html = await resp.Content.ReadAsStringAsync(ct);
+        var html = await SourceHttp.GetStringAsync(Base + slug, cfg, ct);
+        if (string.IsNullOrEmpty(html)) return null;
 
         // 以 <div class="wallpaper" id="wpNNN"> 为分块边界，块内首个 /wp/wpNNN.jpg 即该图的原图与尺寸
         var marks = Regex.Matches(html, "<div class=\"wallpaper\" id=\"(wp\\d+)\">", RegexOptions.IgnoreCase);

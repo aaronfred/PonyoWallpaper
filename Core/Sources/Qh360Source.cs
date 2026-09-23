@@ -87,9 +87,8 @@ internal sealed class Qh360Source : IWallpaperSource
         var url = $"http://wallpaper.apc.360.cn/index.php?c=WallPaper&a=getAppsByCategory&cid={cidStr}&start={start}&count={limit}&from=360chrome";
         try
         {
-            using var resp = await SourceHttp.Get().GetAsync(url, ct);
-            if (!resp.IsSuccessStatusCode) return null;
-            var json = await resp.Content.ReadAsStringAsync(ct);
+            var json = await SourceHttp.GetStringAsync(url, cfg, ct);
+            if (string.IsNullOrEmpty(json)) return null;
             var data = System.Text.Json.JsonSerializer.Deserialize<Qh360Response>(json);
             var items = data?.Data;
             if (items == null || items.Count == 0) return Array.Empty<WallpaperItem>();
