@@ -25,6 +25,17 @@ internal sealed class MainForm : Form
     private readonly Label _status = new();
     // 缩略图下载独立客户端：必须与 _api 同样走代理，否则配了代理也仍直连（此前是裸 new HttpClient）
     private HttpClient _thumbHttp;
+
+    // —— 缩略图内存/流量控制（v1.5.3）——
+    /// <summary>浏览专用的缩略图宽度（卡片显示 190px，240 留高分屏余量）。</summary>
+    private const int ThumbWidth = 240;
+
+    /// <summary>缓存文件宽度超过它就认为存的是原图（旧版本遗留），读到时重新编码成小图并就地覆写（自愈）。</summary>
+    private const int ThumbRawThreshold = 480;
+
+    /// <summary>缩略图下载/解码并发闸门：可见卡片一多就会同时解码十几张大图（单张 5120×2880 解码约 59MB）。</summary>
+    private readonly SemaphoreSlim _thumbGate = new(3, 3);
+
     private readonly ToolTip _tips = new();
 
     // 底部设置条控件
@@ -327,11 +338,18 @@ internal sealed class MainForm : Form
         _btnSources.FlatAppearance.BorderColor = Color.FromArgb(200, 200, 200);
         // v1.4.0 壁纸源：多选菜单，决定图墙从哪些源取图。
         // v1.4.1 修复：ContextMenuStrip 默认点任意项就关闭 → 实际只能勾一个。
-        // AutoClose=false + 失焦关闭 → 可连续勾选多个，点菜单外部/Esc 才收起。
+        // v1.5.3 修复「菜单永久置顶粘屏」：v1.5.0 曾用 AutoClose=false 来实现连续勾选，
+        //   但它的语义是「失去焦点也不关闭」→ 菜单会一直浮在所有窗口最上层。
+        //   改为 AutoClose=true（点外部/切程序/失焦即收起）+ Closing 事件里取消
+        //   「因点击条目而关闭」的情况 → 既能连续勾选，又不会粘屏。
         // 注意：不能设 ShowImageMargin=false —— 勾选标记就画在图像边距列里，
         // 关掉后菜单上看不到任何勾选状态，用户会以为"多选没生效"（v1.5.0 修）
-        _srcMenu = new ContextMenuStrip { AutoClose = false };
-        _srcMenu.LostFocus += (_, _) => _srcMenu.Close();
+        _srcMenu = new ContextMenuStrip { AutoClose = true };
+        _srcMenu.Closing += (_, e) =>
+        {
+            // 点条目（勾选/取消）时不收起菜单，便于连续多选；其他原因（点外部、Esc、切程序）照常关闭。
+            if (e.CloseReason == ToolStripDropDownCloseReason.ItemClicked) e.Cancel = true;
+        };
         _srcMenu.KeyDown += (_, e) => { if (e.KeyCode == Keys.Escape) _srcMenu.Close(); };
         _srcMenu.Opening += (_, _) => RebuildSourceMenu();
         _btnSources.Click += (_, _) =>
@@ -470,8 +488,8 @@ internal sealed class MainForm : Form
     }
 
     /// <summary>
-    /// 重建壁纸源多选菜单。每个源一项，右侧标注状态（免注册 / 已配置 / 未配置 Key / 需反代）。
-    /// 未配置 Key 的源仍可勾选但不会被列入启用集合（Enabled 会自动排除），菜单中用灰字提示。
+    /// 重建壁纸源多选菜单（v1.5.3：每项只显示站点名，可用性用灰字表达）。
+    /// 每个源一项 + 「只看此源」子菜单；未就绪的源仍可勾选，但会以灰字提示。
     /// </summary>
     private void RebuildSourceMenu()
     {
@@ -486,9 +504,9 @@ internal sealed class MainForm : Form
         foreach (var s in _sources.All)
         {
             var ready = s.IsReady(_cfg);
-            var status = s.StatusText(_cfg);
-            var text = $"{s.DisplayName}　{status}";
-            var item = new ToolStripMenuItem(text)
+            // v1.5.3：菜单项只显示站点名。原先拼了「免注册 · 国内源」这类状态文字，
+            // 菜单又长又杂；可用性改用灰字表达（未就绪 = 灰）。
+            var item = new ToolStripMenuItem(s.DisplayName)
             {
                 CheckOnClick = true,
                 Checked = enabled.Contains(s.Key),
@@ -1198,64 +1216,133 @@ internal sealed class MainForm : Form
         }
     }
 
+    /// <summary>
+    /// 缩略图加载（v1.5.3 重写：浏览只吃小图，不吃原图）。
+    ///
+    /// 三条一起才能同时压住内存与流量：
+    ///  ① <b>缓存里存的就是 240px 小图</b>（约 15KB）—— 旧版把原图直接塞进缩略图缓存，
+    ///     一张 5120×2880 的 GitHub 图是 6MB，读到就要解码成约 59MB 内存；现在下载后立即
+    ///     缩放再落盘；历史遗留的大图缓存会在读到时就地重编码（自愈）；
+    ///  ② <b>并发闸门 3</b>：可见卡片一多也不会同时解码十几张大图；
+    ///  ③ 源侧拦截：GitHub 图库在清单阶段按文件大小过滤超大图（见 GitHubWallsSource）。
+    /// </summary>
     private async Task LoadThumbAsync(WallpaperCard card)
     {
+        await _thumbGate.WaitAsync();
         try
         {
             var thumbPath = _cache.ThumbPath(card.Item.StoreId);
-            if (!File.Exists(thumbPath))
+
+            var img = File.Exists(thumbPath) ? TryReadCachedThumb(thumbPath) : null;
+            if (img == null)
             {
                 var url = card.Item.Thumb;
                 if (string.IsNullOrEmpty(url)) return;
-                var dir = Path.GetDirectoryName(thumbPath)!;
-                Directory.CreateDirectory(dir);
 
-                if (url.Contains("wallhaven", StringComparison.OrdinalIgnoreCase))
-                {
-                    // wallhaven：走它自己的反代改写 + 缩略图客户端（反代链路只对 th./w. 子域有意义）
-                    using var resp = await _thumbHttp.GetAsync(WallhavenClient.RewriteForThumbs(url));
-                    resp.EnsureSuccessStatusCode();
-                    await using var fs = File.Create(thumbPath);
-                    await resp.Content.CopyToAsync(fs);
-                }
-                else
-                {
-                    // 其他源（360 / WallpaperCave / GitHub 图库）：走通用链路
-                    // —— 直连 → 镜像候选 → 手填代理，每跳硬超时，失败静默保持占位
-                    if (!await SourceHttp.DownloadToAsync(url, thumbPath, _cfg))
-                        return;
-                }
+                var bytes = await FetchThumbBytesAsync(url);
+                if (bytes == null || bytes.Length == 0) return;
+
+                img = DecodeScaled(bytes);
+                if (img == null) return;
+                TryWriteThumbCache(thumbPath, img);   // 缓存小图：之后浏览零流量、零大图解码
             }
-            // 用字节流构造图片：避免 Image.FromFile 长期锁定缓存文件（否则 LRU 淘汰时删不掉）
-            byte[] bytes = await File.ReadAllBytesAsync(thumbPath);
-            using var ms = new MemoryStream(bytes);
-            using var img = Image.FromStream(ms);
 
-            // 关键：必须在 img 释放前克隆。BeginInvoke 是异步投递的，
-            // 若在 lambda 内 Clone，届时 img 已被 using 释放 → ArgumentException
-            // 必须缩放到显示尺寸再交付卡片：原图 300x200 解码后 234KB/张，而卡片只显示 190px 宽。
-            // 原样 Clone 会让无限下拉累积出上百 MB（实测浏览后私有内存 63MB → 233MB）。
-            // 缩到 240px 宽（卡片 190px 的 1.26x 余量，兼容高分屏），单张降到约 150KB。
-            var scaledH = Math.Max(1, (int)(240.0 / img.Width * img.Height));
-            var copy = new Bitmap(img, new Size(240, scaledH));
-
+            // 交付后由卡片负责释放：BeginInvoke 是异步投递的，lambda 内不能再依赖已释放的 img
             if (IsHandleCreated && !IsDisposed)
             {
                 BeginInvoke(() =>
                 {
-                    if (!card.IsDisposed) card.SetThumb(copy);
-                    else copy.Dispose();
+                    if (!card.IsDisposed) card.SetThumb(img);
+                    else img.Dispose();
                 });
             }
             else
             {
-                copy.Dispose();
+                img.Dispose();
             }
         }
         catch
         {
             // 缩略图失败静默，不阻塞浏览
         }
+        finally
+        {
+            _thumbGate.Release();
+        }
+    }
+
+    /// <summary>取缩略图字节：wallhaven 走它自己的反代改写，其余源走通用链路（直连 → 镜像 → 手填代理）。</summary>
+    private async Task<byte[]?> FetchThumbBytesAsync(string url)
+    {
+        if (url.Contains("wallhaven", StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+                using var resp = await _thumbHttp.GetAsync(WallhavenClient.RewriteForThumbs(url), cts.Token);
+                if (!resp.IsSuccessStatusCode) return null;
+                return await resp.Content.ReadAsByteArrayAsync(cts.Token);
+            }
+            catch { return null; }
+        }
+        return await SourceHttp.GetBytesAsync(url, _cfg);
+    }
+
+    /// <summary>
+    /// 读缩略图缓存：本身已是小图就直接用；若是旧版留下的原图（宽 &gt; <see cref="ThumbRawThreshold"/>），
+    /// 缩放后覆写缓存再交付 —— 浏览一遍即可把历史大图缓存全部换成小图。
+    /// </summary>
+    private static Image? TryReadCachedThumb(string path)
+    {
+        try
+        {
+            // 用字节流构造，避免 Image.FromFile 长期锁定缓存文件（否则 LRU 淘汰时删不掉）
+            using var ms = new MemoryStream(File.ReadAllBytes(path));
+            using var src = Image.FromStream(ms);
+            if (src.Width <= ThumbRawThreshold) return new Bitmap(src);
+
+            var scaled = ScaleTo(src, ThumbWidth);
+            TryWriteThumbCache(path, scaled);
+            return scaled;
+        }
+        catch { return null; }
+    }
+
+    private static Image? DecodeScaled(byte[] bytes)
+    {
+        try
+        {
+            using var ms = new MemoryStream(bytes);
+            using var src = Image.FromStream(ms);
+            return ScaleTo(src, Math.Min(ThumbWidth, src.Width));   // 只缩不放
+        }
+        catch { return null; }
+    }
+
+    /// <summary>等比缩放到指定宽度（高质量插值）。</summary>
+    private static Bitmap ScaleTo(Image src, int width)
+    {
+        var h = Math.Max(1, (int)((double)width / src.Width * src.Height));
+        var bmp = new Bitmap(width, h);
+        using var g = Graphics.FromImage(bmp);
+        g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+        g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+        g.DrawImage(src, 0, 0, width, h);
+        return bmp;
+    }
+
+    /// <summary>原子写缩略图缓存（先写 .tmp 再改名，中断不会留下半个文件）。</summary>
+    private static void TryWriteThumbCache(string path, Image img)
+    {
+        try
+        {
+            var dir = Path.GetDirectoryName(path);
+            if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+            var tmp = path + ".tmp";
+            img.Save(tmp, System.Drawing.Imaging.ImageFormat.Jpeg);
+            File.Move(tmp, path, overwrite: true);
+        }
+        catch { /* 缓存写失败不影响本次显示 */ }
     }
 
     public void InvokeSetStatus(string text) => Invoke(() => _status.Text = text);

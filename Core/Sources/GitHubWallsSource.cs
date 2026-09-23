@@ -10,8 +10,9 @@ namespace PonyoWallpaper;
 /// 原理：
 ///   1) 用 GitHub Trees API 一次性列出仓库全部文件（结果<b>本地缓存 24 小时</b>，
 ///      因为未认证的 GitHub API 只有 60 次/小时，不能让每次翻页都去打接口）；
-///   2) 只保留 <b>.jpg/.jpeg/.png</b> —— 与程序现有 GDI+ 管线完全兼容，
-///      且严格符合「轻量化」原则：不引入任何 webp/avif 解码依赖（本机 WIC 也无 webp codec）；
+///   2) 只保留 <b>.jpg/.jpeg/.png</b>，且 <b>blob ≤ 1MB</b>（见 <see cref="MaxBlobBytes"/>）——
+///      与程序现有 GDI+ 管线完全兼容，不引入任何 webp/avif 解码依赖（本机 WIC 也无 webp codec）；
+///      体积上限是为了「浏览只吃小图」：仓库里中位 2.33MB、最大 44MB，直接当缩略图会顶爆流量与内存（v1.5.3）；
 ///   3) 取图走 <see cref="CdnMirror"/> 展开的多条等价链路（raw / ghproxy / jsDelivr / gh-proxy），
 ///      任一跳通了即用 —— v1.5.2 起单条链路抖动不再导致整片卡片空白。
 ///
@@ -33,11 +34,18 @@ internal sealed class GitHubWallsSource : IWallpaperSource
     /// <summary>允许的图片扩展名（不接 webp/avif —— 保持零解码依赖）。</summary>
     private static readonly string[] Allowed = { ".jpg", ".jpeg", ".png" };
 
+    /// <summary>
+    /// 浏览用文件的体积上限（v1.5.3）。实测这 5 个仓库的图片：中位 2.33MB、P90 10.7MB、最大 44MB ——
+    /// 用原图当缩略图，首屏十几张就要下几十 MB，解码后内存更高（单张 5120×2880 ≈ 59MB）。
+    /// 因此在<b>清单阶段</b>就按 blob size 过滤，只收录小图；若某仓库全部被滤空则自动放宽（见 FetchAsync）。
+    /// </summary>
+    private const long MaxBlobBytes = 1024 * 1024;   // 1.0 MB
+
     /// <summary>清单缓存有效期。</summary>
     private static readonly TimeSpan ManifestTtl = TimeSpan.FromHours(24);
 
-    // repo|branch -> (时间戳, 文件路径列表)。进程内缓存，避免同一次运行重复读盘。
-    private static readonly Dictionary<string, (DateTime At, List<string> Files)> Cache = new();
+    // repo|branch -> (时间戳, 文件列表)。进程内缓存，避免同一次运行重复读盘。
+    private static readonly Dictionary<string, (DateTime At, List<GhFile> Files)> Cache = new();
     private static readonly object CacheLock = new();
 
     public string Key => "github";
@@ -52,6 +60,7 @@ internal sealed class GitHubWallsSource : IWallpaperSource
         {
             var keywords = BuildKeywords(req);
             var pool = new List<(string Repo, string Branch, string Path, string Dir)>();
+            var allPool = new List<(string Repo, string Branch, string Path, string Dir)>();
 
             foreach (var (repo, branch, _) in Repos)
             {
@@ -61,11 +70,21 @@ internal sealed class GitHubWallsSource : IWallpaperSource
                 var picked = 0;
                 foreach (var f in files)
                 {
-                    if (!Allowed.Any(e => f.EndsWith(e, StringComparison.OrdinalIgnoreCase))) continue;
-                    var dir = DirOf(f);
-                    pool.Add((repo, branch, f, dir));
+                    if (string.IsNullOrEmpty(f.Path)) continue;
+                    if (!Allowed.Any(e => f.Path.EndsWith(e, StringComparison.OrdinalIgnoreCase))) continue;
+                    var dir = DirOf(f.Path);
+                    var entry = (repo, branch, f.Path, dir);
+                    allPool.Add(entry);
+                    if (f.Size <= MaxBlobBytes) pool.Add(entry);   // 浏览只收录小图（见 MaxBlobBytes）
                     if (++picked >= 3000) break;   // 安全上限（单仓库通常 ≤ 2200 张）
                 }
+            }
+
+            // 兜底：万一某个仓库/整天全是巨图，过滤后为空就直接放宽，保证分类不空
+            if (pool.Count == 0 && allPool.Count > 0)
+            {
+                Logger.Warn($"github: 无 ≤{MaxBlobBytes / 1024 / 1024}MB 的图，放宽到全量 {allPool.Count} 张");
+                pool = allPool;
             }
 
             if (pool.Count == 0)
@@ -115,7 +134,8 @@ internal sealed class GitHubWallsSource : IWallpaperSource
                 });
             }
 
-            Logger.Info($"github: keywords=[{string.Join(",", keywords)}] pool={pool.Count} page={req.Page} -> {list.Count} items");
+            Logger.Info($"github: keywords=[{string.Join(",", keywords)}] " +
+                        $"pool={pool.Count}/{allPool.Count}(≤{MaxBlobBytes / 1024 / 1024}MB) page={req.Page} -> {list.Count} items");
             return list;
         }
         catch (Exception ex)
@@ -191,20 +211,21 @@ internal sealed class GitHubWallsSource : IWallpaperSource
     /// 取仓库文件清单。优先用本地缓存（24h TTL），再退进程内缓存，最后才打 GitHub API
     /// —— 未认证只有 60 次/小时，绝不能每次翻页都请求。
     /// </summary>
-    private static async Task<List<string>?> GetManifestAsync(string repo, string branch, AppConfig cfg,
+    private static async Task<List<GhFile>?> GetManifestAsync(string repo, string branch, AppConfig cfg,
         CancellationToken ct)
     {
         var key = $"{repo}@{branch}";
         lock (CacheLock)
             if (Cache.TryGetValue(key, out var hit)) return hit.Files;
 
+        // v1.5.3：清单元素带 size（用于过滤超大图），缓存文件名加 gh2- 前缀与旧格式区分
         var cacheFile = Path.Combine(AppPaths.DataDir,
-            "gh-" + repo.Replace('/', '_') + ".json");
+            "gh2-" + repo.Replace('/', '_') + ".json");
         try
         {
             if (File.Exists(cacheFile) && DateTime.UtcNow - File.GetLastWriteTimeUtc(cacheFile) < ManifestTtl)
             {
-                var cached = JsonSerializer.Deserialize<List<string>>(File.ReadAllText(cacheFile, Encoding.UTF8));
+                var cached = JsonSerializer.Deserialize<List<GhFile>>(File.ReadAllText(cacheFile, Encoding.UTF8));
                 if (cached is { Count: > 0 })
                 {
                     lock (CacheLock) Cache[key] = (DateTime.UtcNow, cached);
@@ -227,9 +248,9 @@ internal sealed class GitHubWallsSource : IWallpaperSource
             var tree = JsonSerializer.Deserialize<GitTree>(json);
             var files = tree?.Tree?
                 .Where(t => string.Equals(t.Type, "blob", StringComparison.OrdinalIgnoreCase))
-                .Select(t => t.Path ?? "")
-                .Where(p => p.Length > 0)
-                .ToList() ?? new List<string>();
+                .Select(t => new GhFile { Path = t.Path ?? "", Size = t.Size })
+                .Where(f => f.Path.Length > 0)
+                .ToList() ?? new List<GhFile>();
 
             if (files.Count > 0)
             {
@@ -268,5 +289,13 @@ internal sealed class GitHubWallsSource : IWallpaperSource
     {
         [JsonPropertyName("path")] public string? Path { get; set; }
         [JsonPropertyName("type")] public string? Type { get; set; }
+        [JsonPropertyName("size")] public long Size { get; set; }
+    }
+
+    /// <summary>清单条目：路径 + 文件字节数（字节数用于在清单阶段滤掉超大图，见 <see cref="MaxBlobBytes"/>）。</summary>
+    private sealed class GhFile
+    {
+        [JsonPropertyName("p")] public string Path { get; set; } = "";
+        [JsonPropertyName("s")] public long Size { get; set; }
     }
 }

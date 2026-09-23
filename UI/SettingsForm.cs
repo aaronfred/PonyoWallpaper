@@ -78,8 +78,10 @@ internal sealed class SettingsForm : Form
         y = PlaceRow(rows, y, "缓存配额（MB）", _cacheLimit);
 
         // 当前代理（v1.2.0 / v1.4.2）：两行，右列各一个按钮。
-        //   第一行：可编辑文本框（显示当前生效代理，也可直接手填）+「代理指引」
-        //   第二行：状态条（类型 + 延迟）+「恢复默认代理」
+        //   第一行：可编辑文本框（显示当前生效代理，也可直接手填）+「恢复默认代理」
+        //   第二行：状态条（类型 + 延迟）+「代理指引」
+        // v1.5.3：两个按钮<b>互换位置</b>（按用户要求）—— 常用的"恢复默认"提到第一行与输入框同排，
+        //         「代理指引」下移到状态条旁（属说明性入口，频次低）。
         // 内置默认反代（隐藏）在用时，文本框只显示提示语、不暴露地址。
         var proxyPanel = new Panel { Width = 340, Height = 52 };
         _txtProxy.SetBounds(0, 0, 240, 26);   // 与上方「缓存配额」等宽，右缘对齐
@@ -97,7 +99,7 @@ internal sealed class SettingsForm : Form
         var btnGuide = new Button
         {
             Text = "代理指引",
-            Bounds = new Rectangle(248, 0, 92, 26),
+            Bounds = new Rectangle(248, 28, 92, 24),
             Font = new Font("Microsoft YaHei UI", 9),
             FlatStyle = FlatStyle.Flat
         };
@@ -119,7 +121,7 @@ internal sealed class SettingsForm : Form
         var btnRestoreDefault = new Button
         {
             Text = "恢复默认代理",
-            Bounds = new Rectangle(248, 28, 92, 24),
+            Bounds = new Rectangle(248, 0, 92, 26),
             Font = new Font("Microsoft YaHei UI", 9),
             FlatStyle = FlatStyle.Flat
         };
