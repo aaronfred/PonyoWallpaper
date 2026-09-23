@@ -34,22 +34,22 @@ internal sealed class Qh360Source : IWallpaperSource
     private static readonly Dictionary<string, string> ChannelCid = new(StringComparer.OrdinalIgnoreCase)
     {
         ["nature_landscape"] = "9",   // 风景大片
-        ["nature_sea"]       = "9",
+        ["nature_sea"]       = "9",   // 360 无海洋类，归风景大片
         ["nature_mountain"]  = "9",
         ["nature_sunset"]    = "9",
         ["nature_snow"]      = "9",
         ["nature_flower"]    = "15",  // 小清新
-        ["photo_city"]       = "10",  // 炫酷时尚（最接近都市感）
-        ["photo_space"]      = "9",
-        ["photo_minimalism"] = "15",
+        ["photo_minimalism"] = "15",  // 小清新（最接近）
         ["photo_animals"]    = "14",  // 萌宠动物
         ["photo_cars"]       = "12",  // 汽车天下
         ["people_portrait"]  = "6",   // 美女模特
         ["people_fashion"]   = "11",  // 明星风尚
         ["people_sports"]    = "16",  // 劲爆体育
         ["people_movies"]    = "7",   // 影视剧照
-        ["people_street"]    = "10",
-        ["people_art"]       = "30",  // 爱情美图
+        // v1.5.4 起**不再**给「城市建筑 / 星空宇宙 / 街头纪实 / 艺术人体」硬凑映射：
+        // 曾有 photo_city→炫酷时尚(10)、photo_space→风景大片(9)、people_street→炫酷时尚(10)、
+        // people_art→爱情美图(30) —— 全是张冠李戴，正是"点分类出来很乱"的来源之一。
+        // 这些频道现在只有 WallpaperCave / GitHub 供图（宁缺毋滥）。
         ["anime_girls"]      = "26",  // 动漫卡通
         ["anime_shonen"]     = "26",
         ["anime_mecha"]      = "5",   // 游戏壁纸
@@ -69,18 +69,24 @@ internal sealed class Qh360Source : IWallpaperSource
         var limit = Math.Clamp(req.PerPage, 1, 30);
         var start = (req.Page - 1) * limit;
 
-        // v1.4.1：频道映射优先；没有映射的频道才按页轮换分类
+        // v1.5.4：分类解析顺序 = 一级分类（GroupKeys，按页在该组内轮换）→ 二级频道映射；
+        // 两者都拿不到自家分类时【不再按页轮换分类】—— 那正是"点风景却出来萌宠动物"的根源，改为不出图，
+        // 让本页只由其它有能力的源供图（状态栏会标出实际供图的源）。
         string cidStr, catName;
-        if (!string.IsNullOrEmpty(req.ChannelKey) && ChannelCid.TryGetValue(req.ChannelKey, out var mapped))
+        var groupKey = req.GroupKeys is { Count: > 0 }
+            ? req.GroupKeys[(Math.Max(1, req.Page) - 1) % req.GroupKeys.Count]
+            : null;
+
+        var lookup = groupKey ?? req.ChannelKey;
+        if (!string.IsNullOrEmpty(lookup) && ChannelCid.TryGetValue(lookup, out var mapped))
         {
             cidStr = mapped;
             catName = CidNames.TryGetValue(mapped, out var n) ? n : "360 壁纸";
         }
         else
         {
-            var cat = Categories[(req.Page - 1) % Categories.Length];
-            cidStr = cat.Cid;
-            catName = cat.Name;
+            Logger.Info($"qh360: 频道 {req.ChannelKey} 在 360 无分类映射，本页不出图");
+            return Array.Empty<WallpaperItem>();
         }
 
         // 接口是 http（该站不支持 https），保持原样

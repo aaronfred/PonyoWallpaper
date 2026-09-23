@@ -19,6 +19,15 @@ internal sealed class SourceFetchRequest
     public string ChannelKey { get; init; } = "";
 
     /// <summary>
+    /// 一级分类（树上的「风景 / 摄影 / 人物 / 动漫」）对应的<b>全部子频道 key</b>；点二级频道时为空。
+    ///
+    /// 为什么需要它：一级分类没有具体 tag（wallhaven 靠 category 码就够了），但其它源需要「检索线索」，
+    /// 否则 360 会退化成按页轮换自家分类（点"风景"出来"萌宠动物"）、GitHub 关键词落空后退回全库
+    /// —— 这正是「点分类出来很乱」的主因。各源用它把"一个组"翻译成自己的分类/检索词，按页轮换取其中一个。
+    /// </summary>
+    public IReadOnlyList<string>? GroupKeys { get; init; }
+
+    /// <summary>
     /// 通用关键词（频道 Query 去掉 + 号，如 "landscape nature"）。
     /// v1.5.0 现役三个源都支持检索：wallhaven 用 +tag 语法（WhQuery），
     /// WallpaperCave 用它检索专辑，360 按 ChannelKey 映射到自家分类。

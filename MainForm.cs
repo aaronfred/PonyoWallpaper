@@ -33,8 +33,15 @@ internal sealed class MainForm : Form
     /// <summary>缓存文件宽度超过它就认为存的是原图（旧版本遗留），读到时重新编码成小图并就地覆写（自愈）。</summary>
     private const int ThumbRawThreshold = 480;
 
-    /// <summary>缩略图下载/解码并发闸门：可见卡片一多就会同时解码十几张大图（单张 5120×2880 解码约 59MB）。</summary>
-    private readonly SemaphoreSlim _thumbGate = new(3, 3);
+    /// <summary>缩略图<b>网络</b>并发（纯 IO，内存占用小）：一屏十几张可以并行拉，别让首屏排队。</summary>
+    private readonly SemaphoreSlim _thumbNet = new(6, 6);
+
+    /// <summary>
+    /// 缩略图<b>解码/缩放</b>并发（CPU 与内存重）：收紧到 2，避免同时解码多张大图。
+    /// v1.5.3 曾用单一闸门 3，结果首屏 24 张要分 8 批串行下载 → 用户反馈「加载慢」；
+    /// v1.5.4 拆成「网络宽 + 解码窄」两段，兼顾速度与内存峰值。
+    /// </summary>
+    private readonly SemaphoreSlim _thumbCpu = new(2, 2);
 
     private readonly ToolTip _tips = new();
 
@@ -1035,6 +1042,12 @@ internal sealed class MainForm : Form
 
             // v1.4.0：多源聚合。壁纸源决定「从哪来」；v1.4.1 起频道对非 wallhaven 源也生效：
             // WhQuery 保留 +tag 语法给 wallhaven，Keywords（去 + 号）传给支持检索的源。
+            // v1.5.4：一级分类（grp:100:风景）要带上该组的全部子频道 key ——
+            // 否则 360 会退化成按页轮换自家分类、GitHub 关键词落空后退回全库，导致"点分类出来很乱"。
+            var groupKeys = _currentChannelKey.StartsWith("grp:", StringComparison.Ordinal)
+                ? Channels.KeysOfGroup(_currentChannelKey[4..].Split(':')[0])
+                : null;
+
             var list = await _sources.FetchMergedAsync(_cfg, new SourceFetchRequest
             {
                 Page = _page,
@@ -1044,6 +1057,7 @@ internal sealed class MainForm : Form
                 WhQuery = ch.Query,
                 Keywords = kw,
                 ChannelKey = _currentChannelKey ?? "",
+                GroupKeys = groupKeys,
                 Purity = purity,
                 Sorting = sorting
             });
@@ -1228,23 +1242,49 @@ internal sealed class MainForm : Form
     /// </summary>
     private async Task LoadThumbAsync(WallpaperCard card)
     {
-        await _thumbGate.WaitAsync();
         try
         {
             var thumbPath = _cache.ThumbPath(card.Item.StoreId);
+            Image? img = null;
 
-            var img = File.Exists(thumbPath) ? TryReadCachedThumb(thumbPath) : null;
+            if (File.Exists(thumbPath))
+            {
+                await _thumbCpu.WaitAsync();
+                try { img = TryReadCachedThumb(thumbPath); }
+                finally { _thumbCpu.Release(); }
+            }
+
             if (img == null)
             {
                 var url = card.Item.Thumb;
                 if (string.IsNullOrEmpty(url)) return;
 
-                var bytes = await FetchThumbBytesAsync(url);
+                // 两段式：网络并发放宽（快），解码并发收紧（省内存）
+                byte[]? bytes;
+                await _thumbNet.WaitAsync();
+                try { bytes = await FetchThumbBytesAsync(url); }
+                finally { _thumbNet.Release(); }
+
+                // 首选缩略图取不到（如 wallhaven 小图走不通）→ 回退到备用地址（GitHub 原图）
+                if ((bytes == null || bytes.Length == 0) && !string.IsNullOrEmpty(card.Item.ThumbFallback))
+                {
+                    Logger.Info($"thumb: 首选失败，回退备用地址（{card.Item.SourceKey}）");
+                    await _thumbNet.WaitAsync();
+                    try { bytes = await FetchThumbBytesAsync(card.Item.ThumbFallback); }
+                    finally { _thumbNet.Release(); }
+                }
+
                 if (bytes == null || bytes.Length == 0) return;
 
-                img = DecodeScaled(bytes);
+                await _thumbCpu.WaitAsync();
+                try
+                {
+                    img = DecodeScaled(bytes);
+                    if (img != null) TryWriteThumbCache(thumbPath, img);   // 缓存小图：之后浏览零流量
+                }
+                finally { _thumbCpu.Release(); }
+
                 if (img == null) return;
-                TryWriteThumbCache(thumbPath, img);   // 缓存小图：之后浏览零流量、零大图解码
             }
 
             // 交付后由卡片负责释放：BeginInvoke 是异步投递的，lambda 内不能再依赖已释放的 img
@@ -1265,13 +1305,9 @@ internal sealed class MainForm : Form
         {
             // 缩略图失败静默，不阻塞浏览
         }
-        finally
-        {
-            _thumbGate.Release();
-        }
     }
 
-    /// <summary>取缩略图字节：wallhaven 走它自己的反代改写，其余源走通用链路（直连 → 镜像 → 手填代理）。</summary>
+    /// <summary>取缩略图字节：wallhaven 系一律走反代（含 GitHub 图库里的 wallhaven 小图），其余源走通用链路。</summary>
     private async Task<byte[]?> FetchThumbBytesAsync(string url)
     {
         if (url.Contains("wallhaven", StringComparison.OrdinalIgnoreCase))
@@ -1279,7 +1315,8 @@ internal sealed class MainForm : Form
             try
             {
                 using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
-                using var resp = await _thumbHttp.GetAsync(WallhavenClient.RewriteForThumbs(url), cts.Token);
+                // RewriteThumbAlways：不依赖"当前链路是否在反代"，否则会直连被墙的 wallhaven 域名挂到超时
+                using var resp = await _thumbHttp.GetAsync(_api.RewriteThumbAlways(url), cts.Token);
                 if (!resp.IsSuccessStatusCode) return null;
                 return await resp.Content.ReadAsByteArrayAsync(cts.Token);
             }

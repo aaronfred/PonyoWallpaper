@@ -39,6 +39,21 @@ internal sealed class WallhavenClient : IDisposable
     public static string RewriteForThumbs(string url)
         => _activeMirror == null ? url : RewriteWith(url, _activeMirror);
 
+    /// <summary>
+    /// 把 wallhaven 系 URL <b>必定</b>改写到反代上（用户自填反代优先，否则内置默认反代），
+    /// 与"当前链路是否正好在反代"无关。
+    ///
+    /// 为什么需要它：wallhaven 域名国内直连不可达，缩略图若依赖链路状态，一旦链路在直连
+    /// 就会去连 th.wallhaven.cc 并挂到超时（实测 15s），整批缩略图被拖死。
+    /// v1.5.4：GitHub 图库里的 wallhaven 图改用它的 300×200 小图（实测经反代 27KB/0.7s，
+    /// 而 GitHub 原图是 6.3MB/3.0s）—— 这条路径必须强制走反代。
+    /// </summary>
+    public string RewriteThumbAlways(string url)
+    {
+        var mirror = _mirrorRaw.Count > 0 ? _mirrorRaw[0] : DefaultMirror.Url;
+        return string.IsNullOrWhiteSpace(mirror) ? url : RewriteWith(url, mirror.TrimEnd('/'));
+    }
+
     private static string RewriteWith(string url, string mirror)
     {
         if (url.StartsWith("https://th.wallhaven.cc/", StringComparison.Ordinal))

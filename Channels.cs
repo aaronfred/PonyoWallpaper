@@ -49,5 +49,14 @@ internal static class Channels
         ("动漫", new[] { "anime_girls", "anime_shonen", "anime_mecha", "anime_games", "anime_scenery", "anime_animals" }),
     };
 
+    /// <summary>
+    /// 取某个分类码（100/001/010）下的全部频道 key。
+    /// 用于一级分类点击：让各源把「一个组」翻译成自己的分类/检索词（v1.5.4）。
+    /// </summary>
+    public static string[] KeysOfGroup(string categoryCode)
+        => All.Where(c => string.Equals(c.Category, categoryCode, StringComparison.Ordinal))
+              .Select(c => c.Key)
+              .ToArray();
+
     public static ChannelDef? Find(string key) => Array.Find(All, c => c.Key == key);
 }

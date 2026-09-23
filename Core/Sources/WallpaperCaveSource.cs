@@ -61,9 +61,18 @@ internal sealed class WallpaperCaveSource : IWallpaperSource
     public bool IsReady(AppConfig cfg) => true;
     public string StatusText(AppConfig cfg) => "免注册 · 国际源";
 
-    /// <summary>解析检索词：频道映射优先，其次取频道关键词的首个词，最后退回通用词。</summary>
-    private static string ResolveTerm(SourceFetchRequest req)
+    /// <summary>
+    /// 解析检索词：一级分类（按页在该组内轮换）→ 频道映射 → 关键词首词；都没有则返回 null（不出图）。
+    /// </summary>
+    private static string? ResolveTerm(SourceFetchRequest req)
     {
+        // v1.5.4：一级分类带上了该组全部子频道 key，按页轮换取一个检索词 ——
+        // 以前这里会落到兜底词 "wallpaper"，把不相干的专辑也拉进来
+        if (req.GroupKeys is { Count: > 0 })
+        {
+            var key = req.GroupKeys[(Math.Max(1, req.Page) - 1) % req.GroupKeys.Count];
+            if (ChannelTerm.TryGetValue(key, out var groupTerm)) return groupTerm;
+        }
         if (!string.IsNullOrEmpty(req.ChannelKey) && ChannelTerm.TryGetValue(req.ChannelKey, out var mapped))
             return mapped;
         if (!string.IsNullOrWhiteSpace(req.Keywords))
@@ -71,7 +80,7 @@ internal sealed class WallpaperCaveSource : IWallpaperSource
             var first = req.Keywords.Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
             if (!string.IsNullOrWhiteSpace(first)) return first!;
         }
-        return "wallpaper";
+        return null;
     }
 
     public async Task<IReadOnlyList<WallpaperItem>?> FetchAsync(AppConfig cfg, SourceFetchRequest req, CancellationToken ct)
@@ -80,6 +89,11 @@ internal sealed class WallpaperCaveSource : IWallpaperSource
         {
             // 频道 → 检索词（逐频道单关键词表；实测单词召回远好于双词组合）
             var term = ResolveTerm(req);
+            if (term == null)
+            {
+                Logger.Info($"wallpapercave: 频道 {req.ChannelKey} 无检索词，本页不出图");
+                return Array.Empty<WallpaperItem>();
+            }
 
             var albums = await SearchAlbumsAsync(term, cfg, ct);
             if (albums.Count == 0)

@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 
 namespace PonyoWallpaper;
 
@@ -93,16 +94,24 @@ internal sealed class GitHubWallsSource : IWallpaperSource
                 return Array.Empty<WallpaperItem>();
             }
 
-            // 目录名匹配频道关键词；全部落空时退回全库（这些仓库本身就是壁纸集合，兜底无害），
-            // 保证任何分类都不会因为目录命名差异而空白
             var total = pool.Count;
+            // 目录名匹配频道关键词；命中则只出该目录的图。
+            // v1.5.4：<b>取消"全部落空就退回全库"的兜底</b> —— 那会让"点风景"混进动漫/人物，
+            // 是「点分类出来很乱」的主要来源之一。现在匹配不到就不出图，由其它有能力的源供图。
             if (keywords.Count > 0)
             {
                 var matched = pool
                     .Where(x => keywords.Any(k => x.Dir.Contains(k, StringComparison.OrdinalIgnoreCase)))
                     .ToList();
-                if (matched.Count > 0) pool = matched;
-                else Logger.Info($"github: 目录未命中 [{string.Join(",", keywords)}]，退回全库 {total} 张");
+                if (matched.Count > 0)
+                {
+                    pool = matched;
+                }
+                else
+                {
+                    Logger.Info($"github: 目录未命中 [{string.Join(",", keywords)}]，本页不出图（共 {total} 张候选）");
+                    return Array.Empty<WallpaperItem>();
+                }
             }
 
             // 用 seed/page 做确定性打散：翻页不重复、换一批换 seed 即换图
@@ -120,13 +129,17 @@ internal sealed class GitHubWallsSource : IWallpaperSource
             foreach (var (repo, branch, path, dir) in slice)
             {
                 var url = RawUrl(repo, branch, path);
+                // 这些仓库里大量文件本身就是 wallhaven 的图（文件名 `wallhaven-<id>.jpg`）——
+                // 浏览时直接用 wallhaven 的缩略图服务（几 KB、走内置默认代理），
+                // 比下 1MB 原图快一个数量级；万一取不到会自动回退到 GitHub 原图。
+                var wallThumb = WallhavenThumbFor(path);
                 list.Add(new WallpaperItem
                 {
                     SourceKey = Key,
                     Id = $"{repo.Split('/')[1]}/{path}",      // 稳定唯一（含仓库名，避免跨仓同名）
                     Path = url,
-                    Thumb = url,                               // 原图直链：缩略图与设为壁纸共用，
-                                                               // 下载侧会按 CdnMirror 展开多条镜像链路
+                    Thumb = wallThumb ?? url,
+                    ThumbFallback = wallThumb == null ? "" : url,
                     Resolution = "",
                     Category = dir,
                     Purity = "sfw",
@@ -155,21 +168,23 @@ internal sealed class GitHubWallsSource : IWallpaperSource
         //   dharmx/walls: anime / nord / flowers / centered / architecture / abstract / unsorted …
         //   Joao2Pereira1/Wallpapers: Animes / Fantasy / Logos / Landscapes / Space / Relaxing …
         // 命中则只出该目录的图；全部落空会退回全库（见 FetchAsync）。
+        // v1.5.4 收紧：删掉明显不相干的词（vaporwave 是合成波美学不是风景、relaxing 目录内容不确定、
+        // surreal 与"极简"不符）—— 它们会让"点风景"混进科技感电路板之类的图。
         var map = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase)
         {
-            ["nature_landscape"] = new[] { "landscape", "nature", "scenery", "relaxing", "flowers" },
-            ["nature_sea"]       = new[] { "sea", "ocean", "beach", "water", "vaporwave" },
-            ["nature_mountain"]  = new[] { "mountain", "forest", "nature", "landscape" },
-            ["nature_flower"]    = new[] { "flower", "flowers", "macro", "plant" },
+            ["nature_landscape"] = new[] { "landscape", "nature", "scenery" },
+            ["nature_sea"]       = new[] { "sea", "ocean", "beach", "water" },
+            ["nature_mountain"]  = new[] { "mountain", "forest" },
+            ["nature_flower"]    = new[] { "flower", "flowers", "macro" },
             ["nature_sunset"]    = new[] { "sunset", "sunrise", "sky", "aurora" },
             ["nature_snow"]      = new[] { "snow", "winter", "ice" },
-            ["photo_city"]       = new[] { "city", "architecture", "urban", "cyberpunk", "vaporwave" },
-            ["photo_space"]      = new[] { "space", "aurora", "sci-fi", "star", "galaxy", "cosmic" },
-            ["photo_minimalism"] = new[] { "minimal", "abstract", "surreal", "vaporwave", "nord", "centered" },
-            ["photo_animals"]    = new[] { "animal", "cat", "bird", "macro" },
+            ["photo_city"]       = new[] { "city", "architecture", "urban" },
+            ["photo_space"]      = new[] { "space", "galaxy", "star", "cosmic", "sci-fi" },
+            ["photo_minimalism"] = new[] { "minimal", "abstract", "nord", "centered" },
+            ["photo_animals"]    = new[] { "animal", "cat", "bird" },
             ["photo_cars"]       = new[] { "cars", "car", "vehicle" },
             ["people_portrait"]  = new[] { "portrait", "people", "girl", "waifu" },
-            ["people_fashion"]   = new[] { "fashion", "model", "girl" },
+            ["people_fashion"]   = new[] { "fashion", "model" },
             ["people_sports"]    = new[] { "sport", "athlet" },
             ["people_movies"]    = new[] { "marvel", "movie", "cinema", "film" },
             ["people_street"]    = new[] { "street", "urban", "city" },
@@ -185,6 +200,18 @@ internal sealed class GitHubWallsSource : IWallpaperSource
         if (!string.IsNullOrEmpty(req.ChannelKey) && map.TryGetValue(req.ChannelKey, out var hits))
             return hits.ToList();
 
+        // v1.5.4：一级分类（grp）—— 取该组全部子频道关键词的并集，
+        // 这样"点风景"至少能覆盖 landscape/sea/mountain/flower/sunset/snow 这些目录，而不是退回全库
+        if (req.GroupKeys is { Count: > 0 })
+        {
+            var union = req.GroupKeys
+                .Where(map.ContainsKey)
+                .SelectMany(k => map[k])
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            if (union.Count > 0) return union;
+        }
+
         // 一级分类/无频道：用频道关键词的首词，再退回“全都要”
         if (!string.IsNullOrWhiteSpace(req.Keywords))
         {
@@ -198,6 +225,22 @@ internal sealed class GitHubWallsSource : IWallpaperSource
     {
         var i = path.LastIndexOf('/');
         return i > 0 ? path[..i] : "";
+    }
+
+    /// <summary>
+    /// 文件名形如 <c>wallhaven-135529.jpg</c> / <c>wallhaven-21zryg.png</c> 时返回 wallhaven 的小图地址
+    /// （<c>https://th.wallhaven.cc/small/&lt;id 前两位&gt;/&lt;id&gt;.jpg</c>，通常几 KB）；否则返回 null。
+    /// 浏览只吃这张小图，原图仅在"设为壁纸/收藏下载"时按需取。
+    /// </summary>
+    private static string? WallhavenThumbFor(string path)
+    {
+        var name = path[(path.LastIndexOf('/') + 1)..];
+        var m = Regex.Match(name, @"^wallhaven-([A-Za-z0-9]+)\.(?:jpg|jpeg|png)$", RegexOptions.IgnoreCase);
+        if (!m.Success) return null;
+
+        var id = m.Groups[1].Value.ToLowerInvariant();
+        if (id.Length < 2) return null;
+        return $"https://th.wallhaven.cc/small/{id[..2]}/{id}.jpg";
     }
 
     /// <summary>

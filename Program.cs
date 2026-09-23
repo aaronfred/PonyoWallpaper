@@ -146,7 +146,7 @@ internal static class Program
                     () => mainForm.RebuildThumbProxy()); // 代理变更：缩略图客户端即时重建
                     ThemeManager.Apply(settingsForm, ThemeManager.ShouldUseDark(cfg.Theme));
                 }
-                if (!settingsForm.Visible) settingsForm.Show(mainForm);
+                if (!settingsForm.Visible) settingsForm.ShowAttachedTo(mainForm);
                 else settingsForm.Activate();
             }
 

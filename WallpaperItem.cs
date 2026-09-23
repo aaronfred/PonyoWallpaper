@@ -12,6 +12,13 @@ internal sealed class WallpaperItem
     public string Id { get; init; } = "";
     public string Path { get; init; } = "";
     public string Thumb { get; init; } = "";
+
+    /// <summary>
+    /// 缩略图备用地址（v1.5.4）：当 <see cref="Thumb"/> 取不到时改用它。
+    /// 典型场景：GitHub 图库里的图大多来自 wallhaven（文件名 `wallhaven-&lt;id&gt;.jpg`），
+    /// 于是浏览用 wallhaven 的几 KB 缩略图（走默认代理），失败再回退到 GitHub 原图。
+    /// </summary>
+    public string ThumbFallback { get; init; } = "";
     public string Resolution { get; init; } = "";
     public string Category { get; init; } = "";
     public string Purity { get; init; } = "sfw";

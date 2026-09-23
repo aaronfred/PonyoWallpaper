@@ -122,6 +122,7 @@ internal sealed class SourceRegistry
                     WhQuery = req.WhQuery,
                     Keywords = req.Keywords,
                     ChannelKey = req.ChannelKey,
+                    GroupKeys = req.GroupKeys,
                     Purity = req.Purity,
                     Sorting = req.Sorting
                 };

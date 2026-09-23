@@ -590,6 +590,24 @@ internal sealed class SettingsForm : Form
     /// 打开「代理指引」（http / socks5 / 反代 的填写规则、示例与搭建指南）。
     /// 依次尝试 exe 同目录 → docs 子目录；都没有则从内嵌资源释放后再打开。
     /// </summary>
+    /// <summary>
+    /// v1.5.4：把设置窗**贴着主窗口**显示（在主窗口区域内居中），
+    /// 避免出现「弹出框跑到屏幕别处 / 每次位置都不一样」；主窗口隐藏或最小化时退回屏幕工作区居中。
+    /// </summary>
+    public void ShowAttachedTo(Form owner)
+    {
+        var b = owner.WindowState == FormWindowState.Normal ? owner.Bounds : owner.RestoreBounds;
+        if (!owner.Visible || b.Width <= 0 || b.Height <= 0)
+            b = Screen.FromControl(owner).WorkingArea;
+
+        StartPosition = FormStartPosition.Manual;   // 位置由下面每次显式计算（CenterParent 只在首次显示时生效）
+        Location = new Point(
+            b.Left + Math.Max(0, (b.Width - Width) / 2),
+            b.Top + Math.Max(0, (b.Height - Height) / 2));
+
+        Show(owner);
+    }
+
     private void OpenProxyGuide()
     {
         try
