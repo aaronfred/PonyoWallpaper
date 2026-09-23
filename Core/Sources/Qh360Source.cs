@@ -39,16 +39,16 @@ internal sealed class Qh360Source : IWallpaperSource
         ["nature_sunset"]    = "9",
         ["nature_snow"]      = "9",
         ["nature_flower"]    = "15",  // 小清新
-        ["photo_minimalism"] = "15",  // 小清新（最接近）
         ["photo_animals"]    = "14",  // 萌宠动物
         ["photo_cars"]       = "12",  // 汽车天下
         ["people_portrait"]  = "6",   // 美女模特
         ["people_fashion"]   = "11",  // 明星风尚
         ["people_sports"]    = "16",  // 劲爆体育
         ["people_movies"]    = "7",   // 影视剧照
-        // v1.5.4 起**不再**给「城市建筑 / 星空宇宙 / 街头纪实 / 艺术人体」硬凑映射：
-        // 曾有 photo_city→炫酷时尚(10)、photo_space→风景大片(9)、people_street→炫酷时尚(10)、
-        // people_art→爱情美图(30) —— 全是张冠李戴，正是"点分类出来很乱"的来源之一。
+        // v1.5.4 起**不再**给「城市建筑 / 星空宇宙 / 极简抽象 / 街头纪实 / 艺术人体」硬凑映射：
+        // 曾有 photo_city→炫酷时尚(10)、photo_space→风景大片(9)、photo_minimalism→小清新(15)、
+        // people_street→炫酷时尚(10)、people_art→爱情美图(30) —— 实测全是张冠李戴
+        // （点"极简抽象"返回水稻/芯片特写），正是"点分类出来很乱"的来源之一。
         // 这些频道现在只有 WallpaperCave / GitHub 供图（宁缺毋滥）。
         ["anime_girls"]      = "26",  // 动漫卡通
         ["anime_shonen"]     = "26",
