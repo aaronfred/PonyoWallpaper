@@ -28,6 +28,8 @@ internal sealed class WallhavenClient : IDisposable
     private string? _poolUser;
     private string? _poolPass;
     private int _chainIdx;
+    /// <summary>直连在本会话已确认不可用（v1.5.5）→ 重建链路时不再放进它，避免每次冷启动都白等一次超时。</summary>
+    private bool _directDead;
     // 手填代理（v1.2.0）：锁定后链路只用它，不自动优选、不静默降级
     private string _manualProxy = "";
     private bool _manualLocked;
@@ -168,6 +170,11 @@ internal sealed class WallhavenClient : IDisposable
     /// </summary>
     public async Task<int?> MeasureActiveLatencyAsync(CancellationToken ct = default)
     {
+        // v1.5.5：先把链路指针放到「上次验证有效」的那条再测。
+        // 否则在直连不可达的环境里，状态条会一直显示"不可用"，用户点「恢复默认代理」也看不到好转
+        // —— 这正是「默认反代怎么都无法访问」的观感来源。
+        ApplyPreferredChain();
+
         int? best = null;
         for (int i = 0; i < 2; i++)
         {
@@ -186,6 +193,7 @@ internal sealed class WallhavenClient : IDisposable
                 {
                     var ms = (int)sw.ElapsedMilliseconds;
                     best = best == null ? ms : Math.Min(best.Value, ms);
+                    RememberChain();   // v1.5.5：测速成功 = 这条链路有效 → 记住它，下次直接用
                 }
             }
             catch { /* 单次失败忽略，两次都失败则返回 null */ }
@@ -219,7 +227,9 @@ internal sealed class WallhavenClient : IDisposable
             return;
         }
 
-        _chain.Add((EntryKind.Direct, "", null, null)); // 直连最优先（按用户要求）
+        // v1.5.5：直连被确认不可用后就不再放进链路 —— 国内直连 wallhaven 必挂，
+        // 留着它只会让每次重建链路后的首个请求先白等一次超时（这正是"反代访问不了"的观感来源）
+        if (!_directDead) _chain.Add((EntryKind.Direct, "", null, null)); // 直连最优先（按用户要求）
         foreach (var m in _mirrorRaw)
             _chain.Add((DefaultMirror.IsDefault(m) ? EntryKind.DefaultMirror : EntryKind.Mirror, m, null, null));
         foreach (var line in _userRaw)
@@ -255,7 +265,10 @@ internal sealed class WallhavenClient : IDisposable
         {
             handler = e.Kind == EntryKind.Proxy
                 ? ProxyFactory.Create(e.Url, e.User, e.Pass) ?? new HttpClientHandler()
-                : new HttpClientHandler();
+                : e.Kind == EntryKind.Direct
+                    // 直连：连接阶段 3s 就放弃（国内直连 wallhaven 必然超时，不能让它拖住首屏）
+                    ? new SocketsHttpHandler { ConnectTimeout = TimeSpan.FromSeconds(3) }
+                    : new HttpClientHandler();
         }
         catch (Exception ex)
         {
@@ -263,16 +276,37 @@ internal sealed class WallhavenClient : IDisposable
             handler = new HttpClientHandler();
         }
         _activeMirror = IsMirror(e) ? e.Url : null;
-        var c = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(30) };
+        // v1.5.5：直连整体超时从 30s 收紧到 8s。实测反代完全可用（API 1.7s / 缩略图 0.8s），
+        // 但链路把「直连」排在第一位，每次冷启动都要先白等一次超时才切到反代 —— 用户感知就是
+        // 「反代怎么都无法访问」。现在直连 8s 快速失败，且失败一次后本会话直接跳过直连（见 _directDead）。
+        var timeout = e.Kind == EntryKind.Direct
+            ? TimeSpan.FromSeconds(5)
+            : TimeSpan.FromSeconds(30);
+        var c = new HttpClient(handler) { Timeout = timeout };
         c.DefaultRequestHeaders.Add("User-Agent", "PonyoWallpaper/1.0");
         if (_apiKey.Length > 0)
             c.DefaultRequestHeaders.Add("X-API-Key", _apiKey);
         return c;
     }
 
-    /// <summary>请求失败时切换到链路下一级（粘性成功：成功后保持不变）。</summary>
-    private void RotateProxy()
+    /// <summary>
+    /// 请求失败时切换到链路下一级（粘性成功：成功后保持不变）。
+    ///
+    /// v1.5.5 关键修复：**只在「链路仍停在我失败的那一条」时才推进**。
+    /// 此前并发请求各自无条件推进 `_chainIdx`，于是一个请求刚切到反代、另一个请求的失败又把它切回直连
+    /// （日志特征：`failover -> 默认代理` 紧跟 `failover -> 直连`），导致 wallhaven 永远用不对链路
+    /// —— 这正是用户报「默认反代怎么都无法访问」的直接原因。
+    /// </summary>
+    private void RotateProxy(in (EntryKind Kind, string Url, string? User, string? Pass) used)
     {
+        var cur = Current();
+        if (cur.Kind != used.Kind ||
+            !string.Equals(cur.Url, used.Url, StringComparison.OrdinalIgnoreCase))
+        {
+            return;   // 别人已经切换过了：我的重试直接用新链路即可，不要再推进（否则互相踩）
+        }
+
+        if (cur.Kind == EntryKind.Direct) _directDead = true;
         if (_chain.Count <= 1) return;
         _chainIdx = (_chainIdx + 1) % _chain.Count;
         var old = _http;
@@ -293,8 +327,57 @@ internal sealed class WallhavenClient : IDisposable
     // —— v1.5.2：非 wallhaven 资源的下载改走通用链路（镜像候选 + 手填代理），需要读配置 ——
     private AppConfig? _cfg;
 
+    // —— v1.5.5：链路粘性记忆（上次有效的条目跨会话沿用，连不上才轮换）——
+    private string _preferredChain = "";
+
+    /// <summary>链路条目的稳定标识（用于记忆；内置默认反代只记占位名，不落地址）。</summary>
+    private static string TierKey(in (EntryKind Kind, string Url, string? User, string? Pass) e)
+        => e.Kind switch
+        {
+            EntryKind.Direct => "direct",
+            EntryKind.DefaultMirror => "mirror:default",
+            EntryKind.Mirror => "mirror:" + e.Url,
+            _ => "proxy:" + e.Url
+        };
+
     /// <summary>注入配置：非 wallhaven 源（360 / WallpaperCave / GitHub 图库）的取图需要它读代理设置。</summary>
-    public void AttachConfig(AppConfig cfg) => _cfg = cfg;
+    public void AttachConfig(AppConfig cfg)
+    {
+        _cfg = cfg;
+        _preferredChain = cfg.PreferredChain ?? "";
+        ApplyPreferredChain();
+    }
+
+    /// <summary>
+    /// 把链路指针移到「上次验证有效」的那一条（用户要求：有效就默认用它，连不上才轮换）。
+    /// 这样启动后不会再每次都先打一遍必然失败的直连。
+    /// </summary>
+    private void ApplyPreferredChain()
+    {
+        if (_preferredChain.Length == 0 || _chain.Count == 0) return;
+
+        var idx = -1;
+        for (var i = 0; i < _chain.Count; i++)
+            if (TierKey(_chain[i]) == _preferredChain) { idx = i; break; }
+        if (idx < 0) return;
+
+        _chainIdx = idx;
+        var old = _http;
+        _http = BuildClient();
+        try { old.Dispose(); } catch { }
+        Logger.Info($"request chain: 沿用上次有效链路 -> {ActiveProxyName}");
+    }
+
+    /// <summary>请求成功后记住当前链路（下次启动直接用它；它连不上时 RotateProxy 会自动换下一级）。</summary>
+    private void RememberChain()
+    {
+        var key = TierKey(Current());
+        if (key == _preferredChain) return;
+        _preferredChain = key;
+        if (_cfg == null) return;
+        _cfg.PreferredChain = key;
+        try { _cfg.Save(); } catch { /* 落盘失败不影响本次运行 */ }
+    }
 
     /// <summary>是否 wallhaven 系资源（决定走它自己的反代链路还是通用链路）。</summary>
     private static bool IsWallhavenUrl(string url)
@@ -389,6 +472,7 @@ internal sealed class WallhavenClient : IDisposable
 
         for (int attempt = 0; attempt < 3; attempt++)
         {
+            var used = Current();   // 本次尝试用的链路快照（失败时据此判断是否该推进链路）
             try
             {
                 await AcquireAsync(ct);
@@ -396,6 +480,8 @@ internal sealed class WallhavenClient : IDisposable
                 // 失败切换链路后（直连→反代→代理），重试要用新的地址和客户端
                 var url = PrepareUrl(qsUrl);
                 var http = CurrentHttp();
+                // 诊断（不含地址）：确认这一跳到底用的是哪条链路、URL 有没有被改写成反代
+                Logger.Info($"search try {attempt}: tier={ActiveProxyName} rewritten={(url != qsUrl ? "Y" : "N")} chain={_chainIdx}/{_chain.Count} client={(ReferenceEquals(http, _http) ? "chain" : "direct")}");
                 using var resp = await http.GetAsync(url, ct);
                 if ((int)resp.StatusCode == 429)
                 {
@@ -406,7 +492,7 @@ internal sealed class WallhavenClient : IDisposable
                     if (_chain.Count > 1 && attempt == 0)
                     {
                         Logger.Warn("429 rate-limited, 切换链路重试");
-                        RotateProxy();
+                        RotateProxy(used);
                         await Task.Delay(400, ct);
                         continue;
                     }
@@ -421,6 +507,7 @@ internal sealed class WallhavenClient : IDisposable
                 resp.EnsureSuccessStatusCode();
                 var data = await resp.Content.ReadFromJsonAsync<SearchResponse>(cancellationToken: ct);
                 if (data?.Data == null) return new List<WallpaperItem>();
+                RememberChain();   // v1.5.5：这条链路确实取到了数据 → 记住，下次启动直接用它
                 return data.Data.Select(d => new WallpaperItem
                 {
                     Id = d.Id ?? "",
@@ -436,7 +523,7 @@ internal sealed class WallhavenClient : IDisposable
             catch (Exception ex) when (attempt < 2)
             {
                 Logger.Warn($"search attempt {attempt + 1}: {ex.Message}");
-                RotateProxy();
+                RotateProxy(used);
                 await Task.Delay(TimeSpan.FromSeconds(2 * (attempt + 1)), ct);
             }
         }
@@ -456,6 +543,7 @@ internal sealed class WallhavenClient : IDisposable
 
         for (int attempt = 0; attempt < 3; attempt++)
         {
+            var used = Current();   // 同上：链路快照
             try
             {
                 await AcquireAsync(ct);
@@ -472,12 +560,13 @@ internal sealed class WallhavenClient : IDisposable
                 Directory.CreateDirectory(dir);
                 await using var fs = new FileStream(destPath, FileMode.Create, FileAccess.Write, FileShare.Read);
                 await resp.Content.CopyToAsync(fs, ct);
+                RememberChain();   // v1.5.5：下载成功 → 记住这条链路
                 return;
             }
             catch (Exception ex) when (attempt < 2)
             {
                 Logger.Warn($"download attempt {attempt + 1}: {ex.Message}");
-                RotateProxy();
+                RotateProxy(used);
                 await Task.Delay(TimeSpan.FromSeconds(2 * (attempt + 1)), ct);
             }
         }

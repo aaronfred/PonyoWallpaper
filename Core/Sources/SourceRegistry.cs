@@ -22,8 +22,15 @@ internal sealed class SourceRegistry
     /// </summary>
     public static readonly string[] DefaultEnabled = { "qh360", "wallpapercave", "github" };
 
-    /// <summary>单源超时：避免某个慢源/不可达源拖垮整页加载（合并是等所有源返回的）。</summary>
-    private static readonly TimeSpan PerSourceTimeout = TimeSpan.FromSeconds(12);
+    /// <summary>
+    /// 单源超时：避免某个慢源/不可达源拖垮整页加载（合并是等所有源返回的）。
+    ///
+    /// v1.5.5 从 12s 放宽到 25s —— 12s 太紧：wallhaven 的链路是「直连 → 反代」，
+    /// 直连超时（5s）+ 限流间隔（1.5s）+ 重试延迟（2s）已经逼近 12s，导致它**永远没机会走反代**
+    /// 就被外层砍掉（日志特征：`failover -> 默认代理` 与 `source timeout after 12s` 同时出现），
+    /// 表现就是用户说的「反代怎么都无法访问」。
+    /// </summary>
+    private static readonly TimeSpan PerSourceTimeout = TimeSpan.FromSeconds(25);
 
     public SourceRegistry(WallhavenClient client)
     {
@@ -87,6 +94,16 @@ internal sealed class SourceRegistry
     /// <summary>已启用且当前可用的源（未配置 Key 的需 Key 源自动排除）。</summary>
     public IReadOnlyList<IWallpaperSource> Enabled(AppConfig cfg)
     {
+        // v1.5.5：锁定「浏览源」时**硬保证只取它** —— 这里不再有任何"兜底加回默认组合"，
+        // 这是用户报「筛选单个源还会混入其他源的图」的根治手段
+        // （旧入口藏在源菜单二级子菜单里容易误点，且 res.List 为空时的兜底会把别的源加回来）。
+        if (!string.IsNullOrWhiteSpace(cfg.BrowseSource))
+        {
+            var only = Find(cfg.BrowseSource);
+            if (only != null && only.IsReady(cfg)) return new[] { only };
+            Logger.Warn($"browse source '{cfg.BrowseSource}' 不可用，回退到多源混排");
+        }
+
         var keys = cfg.EnabledSources;
         if (keys == null || keys.Count == 0) keys = DefaultEnabled.ToList();
         var list = new List<IWallpaperSource>();
@@ -123,6 +140,7 @@ internal sealed class SourceRegistry
                     Keywords = req.Keywords,
                     ChannelKey = req.ChannelKey,
                     GroupKeys = req.GroupKeys,
+                    LocalChannelId = req.LocalChannelId,
                     Purity = req.Purity,
                     Sorting = req.Sorting
                 };

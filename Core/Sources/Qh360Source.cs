@@ -64,10 +64,27 @@ internal sealed class Qh360Source : IWallpaperSource
     public bool IsReady(AppConfig cfg) => true;
     public string StatusText(AppConfig cfg) => "免注册 · 国内源";
 
+    /// <summary>
+    /// 360 自家全部 18 个分类（锁定单源浏览时左侧树显示这些，而不是我们硬造的频道名）。
+    /// 注意用 CidNames 而不是 Categories —— 后者只是旧的 6 项轮换顺序表。
+    /// </summary>
+    public IReadOnlyList<(string Id, string Name)> SupportedChannels(AppConfig cfg)
+        => CidNames
+            .OrderBy(kv => int.TryParse(kv.Key, out var n) ? n : 999)
+            .Select(kv => (kv.Key, kv.Value))
+            .ToList();
+
     public async Task<IReadOnlyList<WallpaperItem>?> FetchAsync(AppConfig cfg, SourceFetchRequest req, CancellationToken ct)
     {
         var limit = Math.Clamp(req.PerPage, 1, 30);
         var start = (req.Page - 1) * limit;
+
+        // v1.5.5：锁定单源浏览时树上是 360 自家分类 → 直接用 cid，不做任何映射
+        if (!string.IsNullOrEmpty(req.LocalChannelId)
+            && CidNames.TryGetValue(req.LocalChannelId, out var directName))
+        {
+            return await FetchByCidAsync(cfg, req, req.LocalChannelId, directName, start, limit, ct);
+        }
 
         // v1.5.4：分类解析顺序 = 一级分类（GroupKeys，按页在该组内轮换）→ 二级频道映射；
         // 两者都拿不到自家分类时【不再按页轮换分类】—— 那正是"点风景却出来萌宠动物"的根源，改为不出图，
@@ -89,6 +106,13 @@ internal sealed class Qh360Source : IWallpaperSource
             return Array.Empty<WallpaperItem>();
         }
 
+        return await FetchByCidAsync(cfg, req, cidStr, catName, start, limit, ct);
+    }
+
+    /// <summary>按 360 自家分类 cid 取一页（映射命中 或 锁定单源浏览时的自家分类都走这里）。</summary>
+    private async Task<IReadOnlyList<WallpaperItem>?> FetchByCidAsync(AppConfig cfg, SourceFetchRequest req,
+        string cidStr, string catName, int start, int limit, CancellationToken ct)
+    {
         // 接口是 http（该站不支持 https），保持原样
         var url = $"http://wallpaper.apc.360.cn/index.php?c=WallPaper&a=getAppsByCategory&cid={cidStr}&start={start}&count={limit}&from=360chrome";
         try

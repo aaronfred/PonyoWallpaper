@@ -31,6 +31,25 @@ internal class AppConfig
     /// </summary>
     public List<string>? EnabledSources { get; set; }
 
+    /// <summary>
+    /// 「浏览源」锁定（v1.5.5）：空 = 全部源混排；填了某个源 key 则<b>只从该源取图</b>，
+    /// 并且左侧分类树改为显示<b>该源自己的分类</b>（如 360 的「风景大片 / 小清新」）。
+    ///
+    /// 与 EnabledSources 的区别：EnabledSources 是"哪些源参与混排"（多选），
+    /// 本字段是"当前只看哪一个源"（单选）。用户报「筛选单个源还会混入其他源的图」，
+    /// 根因就是"只看此源"藏在源菜单的二级子菜单里、容易误点父项 —— 现在提到一级入口并硬锁定。
+    /// </summary>
+    public string BrowseSource { get; set; } = "";
+
+    /// <summary>
+    /// 上次验证有效的链路标识（v1.5.5）：<c>direct</c> / <c>mirror:default</c> / <c>mirror:&lt;用户自填反代&gt;</c> /
+    /// <c>proxy:&lt;地址&gt;</c>。
+    ///
+    /// 用途（用户要求「当前代理有效时默认用它，连不上才开始轮换」）：启动时直接把链路指针放到这一条，
+    /// 而不是每次都从"直连"重新试一遍。默认反代只写 <c>mirror:default</c> 这个占位，<b>不落地址</b>。
+    /// </summary>
+    public string PreferredChain { get; set; } = "";
+
     // —— 通用 ——
     public bool StartMinimized { get; set; } = true;
     public int CacheLimitMb { get; set; } = 2048;

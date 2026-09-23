@@ -62,6 +62,16 @@ internal sealed class WallpaperCaveSource : IWallpaperSource
     public string StatusText(AppConfig cfg) => "免注册 · 国际源";
 
     /// <summary>
+    /// WallpaperCave 没有分类页，它的"分类"就是专辑检索词 —— 锁定单源浏览时左侧树显示这些词
+    /// （id = 检索词本身，点选后直接用它检索专辑）。
+    /// </summary>
+    public IReadOnlyList<(string Id, string Name)> SupportedChannels(AppConfig cfg)
+        => ChannelTerm
+            .Select(kv => (Id: kv.Value, Name: Channels.Find(kv.Key)?.Name ?? kv.Value))
+            .Distinct()
+            .ToList();
+
+    /// <summary>
     /// 解析检索词：一级分类（按页在该组内轮换）→ 频道映射 → 关键词首词；都没有则返回 null（不出图）。
     /// </summary>
     private static string? ResolveTerm(SourceFetchRequest req)
@@ -87,8 +97,8 @@ internal sealed class WallpaperCaveSource : IWallpaperSource
     {
         try
         {
-            // 频道 → 检索词（逐频道单关键词表；实测单词召回远好于双词组合）
-            var term = ResolveTerm(req);
+            // 频道 → 检索词：锁定单源浏览时直接用它自家分类（检索词）；否则走通用频道映射
+            var term = !string.IsNullOrEmpty(req.LocalChannelId) ? req.LocalChannelId : ResolveTerm(req);
             if (term == null)
             {
                 Logger.Info($"wallpapercave: 频道 {req.ChannelKey} 无检索词，本页不出图");

@@ -42,7 +42,28 @@ internal sealed class MasonryPanel : Panel
         _cards.Add(card);
         Controls.Add(card);
         TrimExcess();
+        // 批量添加期间只标记，等 EndBatch 统一重排一次 —— 每张卡都重排会让加载一页变成 O(n²)
+        if (_batchDepth > 0) { _batchPending = true; return; }
         Relayout();
+        RequestVisibleThumbs();
+    }
+
+    private int _batchDepth;
+    private bool _batchPending;
+
+    /// <summary>开始批量添加卡片（期间不重排）。</summary>
+    public void BeginBatch() => _batchDepth++;
+
+    /// <summary>结束批量添加：统一重排一次并触发可见缩略图加载。</summary>
+    public void EndBatch()
+    {
+        if (_batchDepth > 0) _batchDepth--;
+        if (_batchDepth > 0) return;
+        if (_batchPending)
+        {
+            _batchPending = false;
+            Relayout();
+        }
         RequestVisibleThumbs();
     }
 

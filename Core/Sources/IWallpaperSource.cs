@@ -28,6 +28,13 @@ internal sealed class SourceFetchRequest
     public IReadOnlyList<string>? GroupKeys { get; init; }
 
     /// <summary>
+    /// 源<b>自己</b>的分类 id（v1.5.5）。锁定单个源浏览时，左侧树显示的是该源自己的分类
+    /// （360 的 cid、WallpaperCave 的检索词、GitHub 的目录关键词），点选后用它直接定位，
+    /// 不再走通用频道映射。
+    /// </summary>
+    public string LocalChannelId { get; init; } = "";
+
+    /// <summary>
     /// 通用关键词（频道 Query 去掉 + 号，如 "landscape nature"）。
     /// v1.5.0 现役三个源都支持检索：wallhaven 用 +tag 语法（WhQuery），
     /// WallpaperCave 用它检索专辑，360 按 ChannelKey 映射到自家分类。
@@ -58,6 +65,14 @@ internal interface IWallpaperSource
 
     /// <summary>菜单右侧的状态提示（如「免注册」「未配置 Key」）。</summary>
     string StatusText(AppConfig cfg);
+
+    /// <summary>
+    /// 本源<b>自己的分类清单</b>（v1.5.5）：锁定该源浏览时，左侧分类树就显示这些项。
+    /// 返回 (id, 显示名) —— id 会原样进 <see cref="SourceFetchRequest.LocalChannelId"/>，
+    /// 由各源自己解释（360 是 cid、WallpaperCave 是检索词、GitHub 是目录关键词）。
+    /// 返回空列表表示该源没有独立分类体系（此时沿用 wallhaven 的通用 23 频道）。
+    /// </summary>
+    IReadOnlyList<(string Id, string Name)> SupportedChannels(AppConfig cfg);
 
     /// <summary>取一页。返回 null = 该源本次失败（调用方跳过，不影响其他源）；空列表 = 没有更多。</summary>
     Task<IReadOnlyList<WallpaperItem>?> FetchAsync(AppConfig cfg, SourceFetchRequest req, CancellationToken ct);

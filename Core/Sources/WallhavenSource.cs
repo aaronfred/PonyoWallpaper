@@ -22,10 +22,27 @@ internal sealed class WallhavenSource : IWallpaperSource
         return hasMirror ? "需反代/代理" : "国内不可达";
     }
 
+    /// <summary>wallhaven 就是通用频道体系本身 → 直接给全部 23 个频道（id 即频道 key）。</summary>
+    public IReadOnlyList<(string Id, string Name)> SupportedChannels(AppConfig cfg)
+        => Channels.All.Select(c => (c.Key, c.Name)).ToList();
+
     public async Task<IReadOnlyList<WallpaperItem>?> FetchAsync(AppConfig cfg, SourceFetchRequest req, CancellationToken ct)
     {
+        // 锁定单源浏览时，树上是 wallhaven 自己的频道（id = 频道 key）→ 就地解析出查询语法
+        var category = req.WhCategory;
+        var query = req.WhQuery;
+        if (!string.IsNullOrEmpty(req.LocalChannelId))
+        {
+            var ch = Channels.Find(req.LocalChannelId);
+            if (ch != null)
+            {
+                category = ch.Category;
+                query = ch.Query;
+            }
+        }
+
         var list = await _client.SearchAsync(
-            req.WhCategory, req.Purity, req.Sorting, req.WhQuery,
+            category, req.Purity, req.Sorting, query,
             cfg.Resolution, req.Page, req.Seed, ct);
 
         if (list == null) return null;

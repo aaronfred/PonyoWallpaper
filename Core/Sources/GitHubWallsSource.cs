@@ -36,6 +36,38 @@ internal sealed class GitHubWallsSource : IWallpaperSource
     private static readonly string[] Allowed = { ".jpg", ".jpeg", ".png" };
 
     /// <summary>
+    /// 通用频道 → 仓库目录关键词。v1.5.4 收紧：删掉明显不相干的词（vaporwave 是合成波美学不是风景、
+    /// relaxing 目录内容不确定、surreal 与"极简"不符）—— 它们会让"点风景"混进科技感电路板之类的图。
+    /// v1.5.5：提为类字段，锁定单源浏览时左侧树直接拿它当"GitHub 自己的分类"。
+    /// </summary>
+    private static readonly Dictionary<string, string[]> ChannelMap = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["nature_landscape"] = new[] { "landscape", "nature", "scenery" },
+        ["nature_sea"]       = new[] { "sea", "ocean", "beach", "water" },
+        ["nature_mountain"]  = new[] { "mountain", "forest" },
+        ["nature_flower"]    = new[] { "flower", "flowers", "macro" },
+        ["nature_sunset"]    = new[] { "sunset", "sunrise", "sky", "aurora" },
+        ["nature_snow"]      = new[] { "snow", "winter", "ice" },
+        ["photo_city"]       = new[] { "city", "architecture", "urban" },
+        ["photo_space"]      = new[] { "space", "galaxy", "star", "cosmic", "sci-fi" },
+        ["photo_minimalism"] = new[] { "minimal", "abstract", "nord", "centered" },
+        ["photo_animals"]    = new[] { "animal", "cat", "bird" },
+        ["photo_cars"]       = new[] { "cars", "car", "vehicle" },
+        ["people_portrait"]  = new[] { "portrait", "people", "girl", "waifu" },
+        ["people_fashion"]   = new[] { "fashion", "model" },
+        ["people_sports"]    = new[] { "sport", "athlet" },
+        ["people_movies"]    = new[] { "marvel", "movie", "cinema", "film" },
+        ["people_street"]    = new[] { "street", "urban", "city" },
+        ["people_art"]       = new[] { "art", "abstract", "surreal", "fantasy" },
+        ["anime_girls"]      = new[] { "anime", "animes", "waifu", "cyberpunk_girl", "girl" },
+        ["anime_shonen"]     = new[] { "anime", "animes", "marvel" },
+        ["anime_mecha"]      = new[] { "robot", "mecha", "sci-fi", "cyberpunk" },
+        ["anime_games"]      = new[] { "game", "coding", "anime" },
+        ["anime_scenery"]    = new[] { "anime", "scenery", "aurora", "fantasy" },
+        ["anime_animals"]    = new[] { "anime", "animal", "cat" },
+    };
+
+    /// <summary>
     /// 浏览用文件的体积上限（v1.5.3）。实测这 5 个仓库的图片：中位 2.33MB、P90 10.7MB、最大 44MB ——
     /// 用原图当缩略图，首屏十几张就要下几十 MB，解码后内存更高（单张 5120×2880 ≈ 59MB）。
     /// 因此在<b>清单阶段</b>就按 blob size 过滤，只收录小图；若某仓库全部被滤空则自动放宽（见 FetchAsync）。
@@ -55,11 +87,24 @@ internal sealed class GitHubWallsSource : IWallpaperSource
     public bool IsReady(AppConfig cfg) => true;
     public string StatusText(AppConfig cfg) => "免注册 · 多链路取图 · 仅 jpg/png";
 
+    /// <summary>
+    /// GitHub 图库的"分类"就是仓库<b>目录关键词</b>（id 取该组第一个关键词，点选后直接拿它匹配目录）。
+    /// 锁定单源浏览时左侧树显示这些。
+    /// </summary>
+    public IReadOnlyList<(string Id, string Name)> SupportedChannels(AppConfig cfg)
+        => ChannelMap
+            .Select(kv => (Id: kv.Value[0], Name: Channels.Find(kv.Key)?.Name ?? kv.Key))
+            .Distinct()
+            .ToList();
+
     public async Task<IReadOnlyList<WallpaperItem>?> FetchAsync(AppConfig cfg, SourceFetchRequest req, CancellationToken ct)
     {
         try
         {
-            var keywords = BuildKeywords(req);
+            // 锁定单源浏览：树上是 GitHub 自己的目录关键词分类 → 直接用它匹配
+            var keywords = !string.IsNullOrEmpty(req.LocalChannelId)
+                ? new List<string> { req.LocalChannelId }
+                : BuildKeywords(req);
             var pool = new List<(string Repo, string Branch, string Path, string Dir)>();
             var allPool = new List<(string Repo, string Branch, string Path, string Dir)>();
 
@@ -170,32 +215,7 @@ internal sealed class GitHubWallsSource : IWallpaperSource
         // 命中则只出该目录的图；全部落空会退回全库（见 FetchAsync）。
         // v1.5.4 收紧：删掉明显不相干的词（vaporwave 是合成波美学不是风景、relaxing 目录内容不确定、
         // surreal 与"极简"不符）—— 它们会让"点风景"混进科技感电路板之类的图。
-        var map = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase)
-        {
-            ["nature_landscape"] = new[] { "landscape", "nature", "scenery" },
-            ["nature_sea"]       = new[] { "sea", "ocean", "beach", "water" },
-            ["nature_mountain"]  = new[] { "mountain", "forest" },
-            ["nature_flower"]    = new[] { "flower", "flowers", "macro" },
-            ["nature_sunset"]    = new[] { "sunset", "sunrise", "sky", "aurora" },
-            ["nature_snow"]      = new[] { "snow", "winter", "ice" },
-            ["photo_city"]       = new[] { "city", "architecture", "urban" },
-            ["photo_space"]      = new[] { "space", "galaxy", "star", "cosmic", "sci-fi" },
-            ["photo_minimalism"] = new[] { "minimal", "abstract", "nord", "centered" },
-            ["photo_animals"]    = new[] { "animal", "cat", "bird" },
-            ["photo_cars"]       = new[] { "cars", "car", "vehicle" },
-            ["people_portrait"]  = new[] { "portrait", "people", "girl", "waifu" },
-            ["people_fashion"]   = new[] { "fashion", "model" },
-            ["people_sports"]    = new[] { "sport", "athlet" },
-            ["people_movies"]    = new[] { "marvel", "movie", "cinema", "film" },
-            ["people_street"]    = new[] { "street", "urban", "city" },
-            ["people_art"]       = new[] { "art", "abstract", "surreal", "fantasy" },
-            ["anime_girls"]      = new[] { "anime", "animes", "waifu", "cyberpunk_girl", "girl" },
-            ["anime_shonen"]     = new[] { "anime", "animes", "marvel" },
-            ["anime_mecha"]      = new[] { "robot", "mecha", "sci-fi", "cyberpunk" },
-            ["anime_games"]      = new[] { "game", "coding", "anime" },
-            ["anime_scenery"]    = new[] { "anime", "scenery", "aurora", "fantasy" },
-            ["anime_animals"]    = new[] { "anime", "animal", "cat" },
-        };
+        var map = ChannelMap;
 
         if (!string.IsNullOrEmpty(req.ChannelKey) && map.TryGetValue(req.ChannelKey, out var hits))
             return hits.ToList();

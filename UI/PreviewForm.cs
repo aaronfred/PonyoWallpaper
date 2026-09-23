@@ -147,6 +147,8 @@ internal sealed class PreviewForm : Form
         var ct = _cts.Token;
         try
         {
+            ShowThumbPlaceholder(item);   // v1.5.5：先摆上已有缩略图，点击后立刻有画面
+
             var fullPath = _cache.FullPath(item.StoreId);
             if (!File.Exists(fullPath))
             {
@@ -161,7 +163,12 @@ internal sealed class PreviewForm : Form
             var bytes = await File.ReadAllBytesAsync(fullPath, ct);
             using var ms = new MemoryStream(bytes);
             using var decoded = Image.FromStream(ms);
-            var img = new Bitmap(decoded); // 脱离流生命周期，ms 可安全释放
+            if (ct.IsCancellationRequested) return;
+
+            // v1.5.5 性能：按窗口所需尺寸预缩，别再让 PictureBox.Zoom 去缩放 5120×2880 的整张位图 ——
+            // 那会让每次重绘都跑一遍大图插值，表现为"点一下图 CPU 就飙满"（客户区 ×2 兼顾高分屏）。
+            var targetW = Math.Max(640, ClientSize.Width * 2);
+            var img = decoded.Width > targetW ? ScaleDown(decoded, targetW) : new Bitmap(decoded);
             if (ct.IsCancellationRequested) { img.Dispose(); return; }
 
             var old = _pic.Image;
@@ -175,6 +182,50 @@ internal sealed class PreviewForm : Form
             _loading.Text = "加载失败：" + ex.Message + "（←→ 可切换其他图）";
             Logger.Warn($"preview load {item.Id}: {ex.Message}");
         }
+    }
+
+    /// <summary>先把已有缩略图摆上来：点击后立刻有画面，不必干等几 MB 原图下完。</summary>
+    private void ShowThumbPlaceholder(WallpaperItem item)
+    {
+        try
+        {
+            var p = _cache.ThumbPath(item.StoreId);
+            if (!File.Exists(p)) return;
+            using var ms = new MemoryStream(File.ReadAllBytes(p));
+            using var d = Image.FromStream(ms);
+            var old = _pic.Image;
+            _pic.Image = new Bitmap(d);
+            old?.Dispose();
+        }
+        catch { /* 占位失败不影响原图加载 */ }
+    }
+
+    /// <summary>等比缩到指定最大宽度。大图两段缩放（Bilinear 粗缩 + Bicubic 精缩），避免 CPU 飙升。</summary>
+    private static Bitmap ScaleDown(Image src, int maxWidth)
+    {
+        var width = Math.Min(maxWidth, src.Width);
+        if (src.Width > width * 2)
+        {
+            var midW = width * 2;
+            var midH = Math.Max(1, (int)((double)midW / src.Width * src.Height));
+            using var mid = new Bitmap(midW, midH);
+            using (var g0 = Graphics.FromImage(mid))
+            {
+                g0.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.Bilinear;
+                g0.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighSpeed;
+                g0.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
+                g0.DrawImage(src, 0, 0, midW, midH);
+            }
+            return ScaleDown(mid, width);
+        }
+
+        var h = Math.Max(1, (int)((double)width / src.Width * src.Height));
+        var bmp = new Bitmap(width, h);
+        using var g = Graphics.FromImage(bmp);
+        g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+        g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+        g.DrawImage(src, 0, 0, width, h);
+        return bmp;
     }
 
     private async Task SetWallpaperAsync()

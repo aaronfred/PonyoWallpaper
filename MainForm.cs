@@ -71,6 +71,8 @@ internal sealed class MainForm : Form
     private bool _syncingSelectAll;      // SyncSelectAll 回写「全选」勾选期间，抑制其 CheckedChanged 批处理
 
     private string _currentChannelKey = "";
+    /// <summary>锁定单源浏览时选中的「源自己的分类」id（v1.5.5）；多源混排时为空。</summary>
+    private string _currentLocalChannel = "";
     private string _currentCategory = "";
     private bool _nsfwMode;   // NSFW 分类浏览（purity=111，需密码 + API Key）
     private bool _favMode;    // 收藏浏览（本地，无分页）
@@ -224,6 +226,7 @@ internal sealed class MainForm : Form
         _tree.AfterSelect += (_, e) =>
         {
             if (e.Node?.Tag is not string tag) return;
+            _currentLocalChannel = "";   // 统一先清空；local: 分支会再赋上源私有分类 id
 
             if (tag == "fav:all")
             {
@@ -254,12 +257,22 @@ internal sealed class MainForm : Form
                 _currentCategory = tag[4..];
                 _cfg.Sub = "all";
             }
+            else if (tag.StartsWith("local:", StringComparison.Ordinal))
+            {
+                // 锁定单源浏览：树上是「源自己的分类」（360 的 cid / WCV 的检索词 / GitHub 的目录词）
+                _favMode = false; _nsfwMode = false;
+                _currentChannelKey = "local";
+                _currentLocalChannel = tag[6..];
+                _currentCategory = "100";
+                _cfg.Sub = tag;
+            }
             else
             {
                 var ch = Channels.Find(tag);
                 if (ch == null) return;
                 _favMode = false; _nsfwMode = false;
                 _currentChannelKey = tag;
+                _currentLocalChannel = "";     // 走进通用频道 → 清掉源私有分类
                 _currentCategory = ch.Category;
                 _cfg.Sub = tag;
             }
@@ -490,18 +503,66 @@ internal sealed class MainForm : Form
     /// <summary>按钮文字显示已启用源数量，如「壁纸源 3」。</summary>
     private void UpdateSourceButtonText()
     {
-        var n = _sources.Enabled(_cfg).Count;
-        _btnSources.Text = $"壁纸源 {n}";
+        // v1.5.5：锁定浏览源时直接显示源名，让"现在只看哪个源"一眼可见
+        if (!string.IsNullOrWhiteSpace(_cfg.BrowseSource)
+            && _sources.Find(_cfg.BrowseSource) is { } only)
+        {
+            _btnSources.Text = $"壁纸源 {only.DisplayName}";
+            return;
+        }
+        _btnSources.Text = $"壁纸源 {_sources.Enabled(_cfg).Count}";
     }
 
     /// <summary>
-    /// 重建壁纸源多选菜单（v1.5.3：每项只显示站点名，可用性用灰字表达）。
-    /// 每个源一项 + 「只看此源」子菜单；未就绪的源仍可勾选，但会以灰字提示。
+    /// 重建壁纸源菜单（v1.5.5）：
+    /// 顶部「浏览源」单选（全部 / 各源）→ 决定左侧分类树显示什么；
+    /// 分隔线以下是「全部模式下参与取图的源」多选勾选。
     /// </summary>
     private void RebuildSourceMenu()
     {
         _buildingSourceMenu = true;
         _srcMenu.Items.Clear();
+
+        // ── v1.5.5 浏览源（单选）：锁定只看某一个源；「全部」= 多源混排 ──
+        //   放在菜单最上面且互斥，替代原先藏在二级子菜单里的「只看此源」——
+        //   用户报「筛选单个源还会混入其他源的图」，很大程度就是旧入口容易误点父项。
+        //   选中某项后左侧分类树会切换成该源自己的分类。
+        var browseOptions = new List<(string Key, string Name)> { ("", "全部（多源混排）") };
+        foreach (var s in _sources.All) browseOptions.Add((s.Key, s.DisplayName));
+
+        foreach (var (key, name) in browseOptions)
+        {
+            var it = new ToolStripMenuItem(name)
+            {
+                CheckOnClick = true,
+                Checked = string.Equals(_cfg.BrowseSource ?? "", key, StringComparison.OrdinalIgnoreCase),
+                Tag = "browse:" + key
+            };
+            var captured = key;
+            it.Click += (_, _) =>
+            {
+                if (string.Equals(_cfg.BrowseSource ?? "", captured, StringComparison.OrdinalIgnoreCase))
+                    return;   // 点的是当前项：保持不变（浏览源不允许被取消）
+
+                _cfg.BrowseSource = captured;
+                _cfg.Save();
+                _currentChannelKey = "";
+                _currentLocalChannel = "";
+                UpdateSourceButtonText();
+                RebuildTree();          // 树按新浏览源重建（单源 → 该源自己的分类）
+                _srcMenu.Close();
+                if (!_favMode) { Reload(); return; }
+                LoadFavorites();
+            };
+            _srcMenu.Items.Add(it);
+        }
+
+        _srcMenu.Items.Add(new ToolStripSeparator());
+        _srcMenu.Items.Add(new ToolStripMenuItem("以下勾选项在「全部」模式下参与取图")
+        {
+            Enabled = false,   // 纯说明行，不可点
+            ForeColor = Color.FromArgb(140, 140, 140)
+        });
 
         // 当前生效的源集合。注意必须与 SourceRegistry.Enabled 用同一套归一化：
         // 配置为 null 或空列表都视为「默认组合」——否则会出「菜单一个勾都没有、按钮却显示
@@ -554,21 +615,8 @@ internal sealed class MainForm : Form
                 if (!_favMode) Reload();
             };
 
-            // 「只看此源」：一键切到单源浏览，避免混排里分不清图来自哪个源
-            var only = new ToolStripMenuItem($"只看此源（{s.DisplayName}）");
-            only.Click += (_, _) =>
-            {
-                _cfg.EnabledSources = new List<string> { s.Key };
-                _cfg.Save();
-                UpdateSourceButtonText();
-                _page = 1;
-                _ended = false;
-                _status.Text = $"只显示：{s.DisplayName}";
-                _srcMenu.Close();
-                if (!_favMode) Reload();
-            };
-            item.DropDownItems.Add(only);
-
+            // v1.5.5：不再挂「只看此源」子菜单 —— 顶层已有「浏览源（单选）」，
+            // 保留子菜单只会让父项带上展开箭头、增加误点概率（用户反馈的"混入其他源"来源之一）。
             _srcMenu.Items.Add(item);
         }
 
@@ -811,19 +859,31 @@ internal sealed class MainForm : Form
         var favNode = new TreeNode("收藏") { Tag = "fav:all" };
         _tree.Nodes.Add(favNode);
 
-        // 分组顺序：风景 → 摄影 → 人物 → 动漫。一级节点 Tag = grp:<分类码>:<名称>，
-        // 点击一级分类显示该分类全部壁纸
-        foreach (var (title, keys) in Channels.TreeGroups)
+        // ── v1.5.5：分类树随「浏览源」变化 ──
+        //   多源混排 → 只显示几个大类（风景/摄影/人物/动漫），不再摆一堆各源能力对不上的子频道；
+        //   锁定单个源 → 显示<b>该源自己的分类</b>（360 的自家分类名 / WallpaperCave 的检索词 / GitHub 的目录词）。
+        var browse = _cfg.BrowseSource;
+        if (string.IsNullOrWhiteSpace(browse))
         {
-            var root = new TreeNode(title);
-            foreach (var k in keys)
+            foreach (var (title, keys) in Channels.TreeGroups)
             {
-                var ch = Channels.Find(k);
-                if (ch != null) root.Nodes.Add(new TreeNode(ch.Name) { Tag = ch.Key });
+                var cat = Channels.Find(keys[0])?.Category ?? "100";
+                _tree.Nodes.Add(new TreeNode(title) { Tag = $"grp:{cat}:{title}" });
             }
-            var cat = Channels.Find(keys[0])?.Category ?? "100";
-            root.Tag = $"grp:{cat}:{title}";
-            _tree.Nodes.Add(root);
+        }
+        else
+        {
+            var src = _sources.Find(browse);
+            var local = src?.SupportedChannels(_cfg) ?? Array.Empty<(string Id, string Name)>();
+            foreach (var (id, name) in local)
+                _tree.Nodes.Add(new TreeNode(name) { Tag = $"local:{id}" });
+
+            if (local.Count == 0)   // 兜底：该源没有独立分类体系时仍给通用大类
+                foreach (var (title, keys) in Channels.TreeGroups)
+                {
+                    var cat = Channels.Find(keys[0])?.Category ?? "100";
+                    _tree.Nodes.Add(new TreeNode(title) { Tag = $"grp:{cat}:{title}" });
+                }
         }
 
         // NSFW 分类（需 API Key）：拆「Sketchy / NSFW」两个子分类，仅在隐藏设置开启且本会话已通过密码解锁时出现；
@@ -838,9 +898,9 @@ internal sealed class MainForm : Form
 
         _tree.ExpandAll();
 
-        // 打开首页默认显示「风景 · 自然风光」（不恢复上次节点，NSFW 永不自动恢复）
-        var firstGroup = _tree.Nodes.Cast<TreeNode>().FirstOrDefault(n => n.Nodes.Count > 0);
-        if (firstGroup != null) _tree.SelectedNode = firstGroup.Nodes[0];
+        // 默认选中第一个可选分类（收藏之后的第一项）
+        var first = _tree.Nodes.Cast<TreeNode>().FirstOrDefault(n => n.Tag is string t && t != "fav:all");
+        if (first != null) _tree.SelectedNode = first;
         _tree.EndUpdate();
     }
 
@@ -1026,6 +1086,16 @@ internal sealed class MainForm : Form
                 sorting = _cfg.Sorting;
                 resolution = _cfg.Resolution;
             }
+            else if (_currentChannelKey == "local")
+            {
+                // v1.5.5：锁定单源浏览时选中的是「源自己的分类」，语义完全由该源解释（LocalChannelId）。
+                // 这里只需要一个占位定义 —— 旧代码没有这个分支，会被下面的 Channels.Find("local") == null
+                // 直接 return，导致整页永远停在"加载中…"。
+                ch = new ChannelDef("local", "源分类", "100", "");
+                purity = "100";
+                sorting = _cfg.Sorting;
+                resolution = _cfg.Resolution;
+            }
             else
             {
                 var found = Channels.Find(_currentChannelKey);
@@ -1058,6 +1128,7 @@ internal sealed class MainForm : Form
                 Keywords = kw,
                 ChannelKey = _currentChannelKey ?? "",
                 GroupKeys = groupKeys,
+                LocalChannelId = _currentLocalChannel,
                 Purity = purity,
                 Sorting = sorting
             });
@@ -1088,13 +1159,18 @@ internal sealed class MainForm : Form
             var seen = new HashSet<string>();
             var srcLabels = new List<string>();
             foreach (var card in _flow.Cards) seen.Add(card.Item.Id);
-            foreach (var item in list)
+            _flow.BeginBatch();      // v1.5.5：整页卡片一次性重排，避免逐张重排造成的卡顿
+            try
             {
-                if (_blacklist.Contains(item.StoreId) || seen.Contains(item.StoreId)) continue;
-                AddCard(item);
-                added++;
-                if (!srcLabels.Contains(item.SourceLabel)) srcLabels.Add(item.SourceLabel);
+                foreach (var item in list)
+                {
+                    if (_blacklist.Contains(item.StoreId) || seen.Contains(item.StoreId)) continue;
+                    AddCard(item);
+                    added++;
+                    if (!srcLabels.Contains(item.SourceLabel)) srcLabels.Add(item.SourceLabel);
+                }
             }
+            finally { _flow.EndBatch(); }
             _page++;
             if (added > 0) _emptyStreak = 0;
 
@@ -1356,9 +1432,28 @@ internal sealed class MainForm : Form
         catch { return null; }
     }
 
-    /// <summary>等比缩放到指定宽度（高质量插值）。</summary>
+    /// <summary>
+    /// 等比缩放到指定宽度。**大图走两段缩放**：先 Bilinear 粗缩到 2× 目标宽，再 Bicubic 精缩到底。
+    /// 直接拿 HighQualityBicubic 把 5120×2880 缩到 240px 是纯 CPU 灾难（首页/换频道时肉眼可见卡顿），
+    /// 两段法质量几乎无损、耗时降一个数量级（v1.5.5 性能优化）。
+    /// </summary>
     private static Bitmap ScaleTo(Image src, int width)
     {
+        if (src.Width > width * 2)
+        {
+            var midW = width * 2;
+            var midH = Math.Max(1, (int)((double)midW / src.Width * src.Height));
+            using var mid = new Bitmap(midW, midH);
+            using (var g0 = Graphics.FromImage(mid))
+            {
+                g0.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.Bilinear;
+                g0.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighSpeed;
+                g0.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
+                g0.DrawImage(src, 0, 0, midW, midH);
+            }
+            return ScaleTo(mid, width);   // 此时源只有 2× 目标宽，Bicubic 很快
+        }
+
         var h = Math.Max(1, (int)((double)width / src.Width * src.Height));
         var bmp = new Bitmap(width, h);
         using var g = Graphics.FromImage(bmp);
