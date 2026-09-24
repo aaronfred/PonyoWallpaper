@@ -36,7 +36,7 @@ internal static class Program
                 using var api = new WallhavenClient(cfg.ApiKey, cfg.ProxyUrl, cfg.ProxyUser, cfg.ProxyPassword, cfg.ProxyUrls);
                 api.SetMirrors(cfg.CfProxyUrls);
                 var cache = new CacheManager(AppPaths.CacheFullDir, AppPaths.CacheThumbDir, cfg.CacheLimitMb);
-                var engine = new RotationEngine(cfg, api, cache);
+                var engine = new RotationEngine(cfg, api, cache, new SourceRegistry(api));
                 var item = engine.NextAsync().GetAwaiter().GetResult();
                 Logger.Info($"test-rotate => {(item == null ? "FAIL" : "OK " + item.Id + " " + item.Resolution)}");
             }
@@ -116,7 +116,8 @@ internal static class Program
             api.SetManualProxy(cfg.ManualProxy, cfg.ManualProxyLocked); // v1.2.0：手填代理锁定（重启后保持）
             api.AttachConfig(cfg);           // v1.5.2：非 wallhaven 资源下载走通用链路（镜像 + 代理）
             var cache = new CacheManager(AppPaths.CacheFullDir, AppPaths.CacheThumbDir, cfg.CacheLimitMb);
-            var engine = new RotationEngine(cfg, api, cache);
+            var sources = new SourceRegistry(api);
+            var engine = new RotationEngine(cfg, api, cache, sources);
             var history = new HistoryStore();
             var favorites = new ListStore(AppPaths.FavoritesFile);
             var blacklist = new ListStore(AppPaths.BlacklistFile);

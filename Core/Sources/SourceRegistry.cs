@@ -94,16 +94,8 @@ internal sealed class SourceRegistry
     /// <summary>已启用且当前可用的源（未配置 Key 的需 Key 源自动排除）。</summary>
     public IReadOnlyList<IWallpaperSource> Enabled(AppConfig cfg)
     {
-        // v1.5.5：锁定「浏览源」时**硬保证只取它** —— 这里不再有任何"兜底加回默认组合"，
-        // 这是用户报「筛选单个源还会混入其他源的图」的根治手段
-        // （旧入口藏在源菜单二级子菜单里容易误点，且 res.List 为空时的兜底会把别的源加回来）。
-        if (!string.IsNullOrWhiteSpace(cfg.BrowseSource))
-        {
-            var only = Find(cfg.BrowseSource);
-            if (only != null && only.IsReady(cfg)) return new[] { only };
-            Logger.Warn($"browse source '{cfg.BrowseSource}' 不可用，回退到多源混排");
-        }
-
+        // v1.5.7：「浏览源单选锁定」随其 UI 一并移除——单源浏览 = 只勾一个源，
+        // 这里恒按 EnabledSources 取（归一化 + 可用性过滤 + 兜底）。
         var keys = cfg.EnabledSources;
         if (keys == null || keys.Count == 0) keys = DefaultEnabled.ToList();
         var list = new List<IWallpaperSource>();

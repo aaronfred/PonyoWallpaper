@@ -345,7 +345,8 @@ internal sealed class MainForm : Form
         };
         row.Controls.Add(_btnRotScope);
 
-        // v1.4.0 壁纸源：多选菜单，决定图墙从哪些源取图（频道树只对 wallhaven 生效）
+        // v1.4.0 壁纸源：多选菜单，决定图墙从哪些源取图。
+        // v1.5.7：启用源恰好一个时，分类树与自动更换范围会切换为该源自己的分类。
         _btnSources = new Button
         {
             Width = 108,
@@ -487,7 +488,7 @@ internal sealed class MainForm : Form
         _tips.SetToolTip(btnSettings, "打开设置中心（托盘右键也可进入）");
 
         // 悬停提示
-        _tips.SetToolTip(_btnRotScope, "点击展开频道多选列表（可精确到二级频道），勾选即时生效\n全局快捷键：Ctrl+Alt+N 下一张 / Ctrl+Alt+P 上一张");
+        _tips.SetToolTip(_btnRotScope, "自动更换的取图范围（随壁纸源变化：单源=该源分类，多源=大类频道），勾选即时生效\n全局快捷键：Ctrl+Alt+N 下一张 / Ctrl+Alt+P 上一张");
         _tips.SetToolTip(_numInterval, "自动更换间隔（5–1440 分钟），保存后立即生效");
         _tips.SetToolTip(_cboResolution, "浏览与自动更换的最低分辨率（1080p / 2K / 4K）");
         _tips.SetToolTip(_cboFill, "桌面壁纸填充方式，切换立即生效");
@@ -502,72 +503,53 @@ internal sealed class MainForm : Form
 
     /// <summary>按钮文字显示已启用源数量，如「壁纸源 3」。</summary>
     private void UpdateSourceButtonText()
-    {
-        // v1.5.5：锁定浏览源时直接显示源名，让"现在只看哪个源"一眼可见
-        if (!string.IsNullOrWhiteSpace(_cfg.BrowseSource)
-            && _sources.Find(_cfg.BrowseSource) is { } only)
-        {
-            _btnSources.Text = $"壁纸源 {only.DisplayName}";
-            return;
-        }
-        _btnSources.Text = $"壁纸源 {_sources.Enabled(_cfg).Count}";
-    }
+        => _btnSources.Text = $"壁纸源 {_sources.Enabled(_cfg).Count}";
 
     /// <summary>
-    /// 重建壁纸源菜单（v1.5.5）：
-    /// 顶部「浏览源」单选（全部 / 各源）→ 决定左侧分类树显示什么；
-    /// 分隔线以下是「全部模式下参与取图的源」多选勾选。
+    /// 重建壁纸源菜单（v1.5.7 简化）：
+    /// 顶部「全选」（一键启用全部源）+ 分隔线 + 各源勾选项。
+    /// 启用源恰好一个时，左侧分类树与自动更换范围自动切换为该源自己的分类。
+    /// （v1.5.5 的「浏览源单选」顶层区按用户要求移除——菜单只保留一套勾选。）
     /// </summary>
     private void RebuildSourceMenu()
     {
         _buildingSourceMenu = true;
         _srcMenu.Items.Clear();
 
-        // ── v1.5.5 浏览源（单选）：锁定只看某一个源；「全部」= 多源混排 ──
-        //   放在菜单最上面且互斥，替代原先藏在二级子菜单里的「只看此源」——
-        //   用户报「筛选单个源还会混入其他源的图」，很大程度就是旧入口容易误点父项。
-        //   选中某项后左侧分类树会切换成该源自己的分类。
-        var browseOptions = new List<(string Key, string Name)> { ("", "全部（多源混排）") };
-        foreach (var s in _sources.All) browseOptions.Add((s.Key, s.DisplayName));
-
-        foreach (var (key, name) in browseOptions)
-        {
-            var it = new ToolStripMenuItem(name)
-            {
-                CheckOnClick = true,
-                Checked = string.Equals(_cfg.BrowseSource ?? "", key, StringComparison.OrdinalIgnoreCase),
-                Tag = "browse:" + key
-            };
-            var captured = key;
-            it.Click += (_, _) =>
-            {
-                if (string.Equals(_cfg.BrowseSource ?? "", captured, StringComparison.OrdinalIgnoreCase))
-                    return;   // 点的是当前项：保持不变（浏览源不允许被取消）
-
-                _cfg.BrowseSource = captured;
-                _cfg.Save();
-                _currentChannelKey = "";
-                _currentLocalChannel = "";
-                UpdateSourceButtonText();
-                RebuildTree();          // 树按新浏览源重建（单源 → 该源自己的分类）
-                _srcMenu.Close();
-                if (!_favMode) { Reload(); return; }
-                LoadFavorites();
-            };
-            _srcMenu.Items.Add(it);
-        }
-
-        _srcMenu.Items.Add(new ToolStripSeparator());
-        _srcMenu.Items.Add(new ToolStripMenuItem("以下勾选项在「全部」模式下参与取图")
-        {
-            Enabled = false,   // 纯说明行，不可点
-            ForeColor = Color.FromArgb(140, 140, 140)
-        });
-
         // 当前生效的源集合。注意必须与 SourceRegistry.Enabled 用同一套归一化：
         // 配置为 null 或空列表都视为「默认组合」——否则会出「菜单一个勾都没有、按钮却显示
         // 壁纸源 3」的自相矛盾状态（v1.5.0 修）
         var enabled = new HashSet<string>(CurrentSourceKeys(), StringComparer.OrdinalIgnoreCase);
+        var sourceItems = new List<ToolStripMenuItem>();
+
+        // ── 顶部「全选」：勾选 = 启用全部源 ──
+        //   取消方向被拒绝（至少保留一个源）；部分勾选时点击即补齐全部。
+        var selAll = new ToolStripMenuItem("全选")
+        {
+            CheckOnClick = true,
+            Checked = enabled.Count >= _sources.All.Count
+        };
+        selAll.CheckedChanged += (_, _) =>
+        {
+            if (_buildingSourceMenu) return;
+            if (!selAll.Checked)
+            {
+                // 不允许清空：回滚勾选状态并提示（清空后图墙永远空白）
+                _buildingSourceMenu = true;
+                selAll.Checked = true;
+                _buildingSourceMenu = false;
+                _status.Text = "至少需保留一个壁纸源（取消单个源请直接点该源）";
+                return;
+            }
+            _buildingSourceMenu = true;
+            try { foreach (var it in sourceItems) it.Checked = true; }
+            finally { _buildingSourceMenu = false; }
+            _cfg.EnabledSources = _sources.All.Select(s => s.Key).ToList();
+            _cfg.Save();
+            AfterSourcesChanged();
+        };
+        _srcMenu.Items.Add(selAll);
+        _srcMenu.Items.Add(new ToolStripSeparator());
 
         foreach (var s in _sources.All)
         {
@@ -582,6 +564,7 @@ internal sealed class MainForm : Form
                 ForeColor = ready ? SystemColors.ControlText : Color.FromArgb(150, 150, 150),
                 Tag = s
             };
+            sourceItems.Add(item);
             item.CheckedChanged += (_, _) =>
             {
                 if (_buildingSourceMenu) return;
@@ -609,14 +592,12 @@ internal sealed class MainForm : Form
                 }
                 _cfg.EnabledSources = keys;
                 _cfg.Save();
-                UpdateSourceButtonText();
-                _page = 1;
-                _ended = false;
-                if (!_favMode) Reload();
+                // 「全选」随子项联动（全部勾上才是勾选态）
+                _buildingSourceMenu = true;
+                selAll.Checked = keys.Count >= _sources.All.Count;
+                _buildingSourceMenu = false;
+                AfterSourcesChanged();
             };
-
-            // v1.5.5：不再挂「只看此源」子菜单 —— 顶层已有「浏览源（单选）」，
-            // 保留子菜单只会让父项带上展开箭头、增加误点概率（用户反馈的"混入其他源"来源之一）。
             _srcMenu.Items.Add(item);
         }
 
@@ -628,6 +609,20 @@ internal sealed class MainForm : Form
                 it.ForeColor = Color.FromArgb(150, 150, 150);
 
         _buildingSourceMenu = false;
+    }
+
+    /// <summary>
+    /// 源勾选变化后的统一收尾（v1.5.7）：按钮文字、分类树与轮换菜单都随「启用源集合」重建——
+    /// 启用源恰好一个时，树与自动更换范围会切换为该源自己的分类。
+    /// </summary>
+    private void AfterSourcesChanged()
+    {
+        UpdateSourceButtonText();
+        RebuildTree();          // BuildTree + RebuildRotationMenu（选中首个分类即触发重载）
+        _page = 1;
+        _ended = false;
+        if (!_favMode) Reload();
+        else LoadFavorites();
     }
 
     /// <summary>
@@ -669,10 +664,22 @@ internal sealed class MainForm : Form
         _tips.SetToolTip(_btnTree, _treeVisible ? "向左收起分类栏" : "展开分类栏");
     }
 
-    /// <summary>构建自动更换范围多选菜单（分类 → 二级频道两级勾选，分组与树一致）。</summary>
+    /// <summary>构建自动更换范围多选菜单。
+    /// v1.5.7：随启用源变化 —— 启用源恰好一个且该源有自己的分类体系时，平铺显示该源分类
+    /// （存为 local:&lt;id&gt;，轮换引擎直接按源私有分类取图）；多源时保持 wallhaven 四组级联。</summary>
     private ToolStripDropDown BuildRotationMenu()
     {
         var dd = new ToolStripDropDown { Font = new Font("Microsoft YaHei UI", 9) };
+
+        var enabledNow = _sources.Enabled(_cfg);
+        var single = enabledNow.Count == 1 ? enabledNow[0] : null;
+        var singleLocals = single?.SupportedChannels(_cfg) ?? Array.Empty<(string Id, string Name)>();
+        if (single != null && singleLocals.Count > 0)
+        {
+            BuildSingleSourceRotationMenu(dd, single, singleLocals);
+            ThemeManager.ApplyMenu(dd, ThemeManager.LastDark);
+            return dd;
+        }
 
         foreach (var (title, keys) in Channels.TreeGroups)
         {
@@ -766,6 +773,100 @@ internal sealed class MainForm : Form
         return dd;
     }
 
+    /// <summary>
+    /// 单源模式的自动更换范围菜单（v1.5.7）：顶部「全选」+ 平铺该源自己的分类。
+    /// 勾选存为 <c>local:&lt;分类id&gt;</c>，轮换引擎按源私有分类直接取图（不再绕 wallhaven 频道映射）。
+    /// 旧配置里残留的 wallhaven 频道 key 由引擎按模式过滤，无需迁移。
+    /// </summary>
+    private void BuildSingleSourceRotationMenu(
+        ToolStripDropDown dd, IWallpaperSource src, IReadOnlyList<(string Id, string Name)> locals)
+    {
+        var allKeys = locals.Select(x => "local:" + x.Id).ToList();
+        var selectedSet = new HashSet<string>(_cfg.RotationChannels ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
+        var nameByItemKey = locals.ToDictionary(x => "local:" + x.Id, x => x.Name, StringComparer.OrdinalIgnoreCase);
+
+        // 顶部「全选」：勾选 = 该源全部分类；取消 = 清空（引擎兜底=全部分类，行为等价）
+        var selAll = new ToolStripMenuItem("全选") { CheckOnClick = true };
+        selAll.Checked = allKeys.Count > 0 && allKeys.All(selectedSet.Contains);
+        var items = new List<ToolStripMenuItem>();
+        selAll.CheckedChanged += (_, _) =>
+        {
+            if (_buildingRotationMenu > 0 || _syncingSelectAll) return;
+            var want = selAll.Checked;
+            _buildingRotationMenu++;
+            try
+            {
+                foreach (var it in items)
+                {
+                    if (it.Checked != want)
+                    {
+                        it.Checked = want;   // 触发 CheckedChanged → UpdateRotationChannel
+                    }
+                }
+            }
+            finally { _buildingRotationMenu--; }
+            if (!want)
+            {
+                // 清空方向：把 local: 键全部移除（引擎兜底=全部分类）
+                var remain = (_cfg.RotationChannels ?? new List<string>())
+                    .Where(k => !allKeys.Contains(k, StringComparer.OrdinalIgnoreCase))
+                    .ToList();
+                _cfg.RotationChannels = remain;
+                _cfg.Save();
+                UpdateRotScopeText();
+            }
+            UpdateRotScopeText();
+            _ = _engine.NextAsync();   // 与单条勾选行为一致：整批改完后再换一张
+        };
+        dd.Items.Add(selAll);
+        dd.Items.Add(new ToolStripSeparator());
+
+        foreach (var (id, name) in locals)
+        {
+            var itemKey = "local:" + id;
+            var item = new ToolStripMenuItem(name)
+            {
+                CheckOnClick = true,
+                Checked = selectedSet.Contains(itemKey),
+                Tag = itemKey
+            };
+            items.Add(item);
+            item.CheckedChanged += (_, _) =>
+            {
+                // 与多源组内子项同款：批处理（点「全选」）期间照常写入配置，
+                // 仅由 _buildingRotationMenu 抑制「换壁纸」与「全选」自回写
+                UpdateRotationChannel(itemKey, item.Checked);
+                if (_buildingRotationMenu > 0) return;
+                // 反向同步「全选」自身
+                var now = new HashSet<string>(_cfg.RotationChannels ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
+                var all = allKeys.All(now.Contains);
+                if (selAll.Checked != all)
+                {
+                    _syncingSelectAll = true;
+                    try { selAll.Checked = all; }
+                    finally { _syncingSelectAll = false; }
+                }
+            };
+            dd.Items.Add(item);
+        }
+
+        // NSFW（wallhaven 专属，需 API Key）：单源是其他源时仍允许勾选——
+        // 引擎对 nsfw key 恒走 wallhaven 直连路径
+        if (_cfg.ShowNsfw && HiddenAuth.Unlocked)
+        {
+            dd.Items.Add(new ToolStripSeparator());
+            var nsfw = new ToolStripMenuItem("NSFW（需 API Key）")
+            {
+                CheckOnClick = true,
+                Checked = _cfg.RotationChannels?.Contains("nsfw") == true
+            };
+            nsfw.CheckedChanged += (_, _) => UpdateRotationChannel("nsfw", nsfw.Checked);
+            dd.Items.Add(nsfw);
+        }
+
+        dd.Closing += MenuClosingHandler;
+    }
+
     /// <summary>菜单关闭拦截：ItemClicked 取消（可连续勾选），其余（完成/外部/Esc）自动保存并关闭。</summary>
     private void MenuClosingHandler(object? sender, ToolStripDropDownClosingEventArgs e)
     {
@@ -818,6 +919,25 @@ internal sealed class MainForm : Form
     private void UpdateRotScopeText()
     {
         var selected = _cfg.RotationChannels ?? new List<string>();
+
+        // v1.5.7 单源模式：勾选存为 local:<id> → 显示该源分类名；全选时显示源名
+        var enabledNow = _sources.Enabled(_cfg);
+        if (enabledNow.Count == 1)
+        {
+            var locals = enabledNow[0].SupportedChannels(_cfg);
+            if (locals.Count > 0)
+            {
+                var nameByKey = locals.ToDictionary(x => "local:" + x.Id, x => x.Name, StringComparer.OrdinalIgnoreCase);
+                var names = selected.Where(nameByKey.ContainsKey).Select(k => nameByKey[k]).ToList();
+                var allOn = locals.All(x => selected.Contains("local:" + x.Id, StringComparer.OrdinalIgnoreCase));
+                _btnRotScope.Text = allOn && names.Count > 0 ? enabledNow[0].DisplayName
+                    : names.Count > 0 ? string.Join(" + ", names)
+                    : "点击选择频道…";
+                return;
+            }
+            // 该源没有自有分类 → 落到下面的通用大类逻辑
+        }
+
         var parts = new List<string>();
         foreach (var (title, keys) in Channels.TreeGroups)
         {
@@ -859,11 +979,13 @@ internal sealed class MainForm : Form
         var favNode = new TreeNode("收藏") { Tag = "fav:all" };
         _tree.Nodes.Add(favNode);
 
-        // ── v1.5.5：分类树随「浏览源」变化 ──
+        // ── v1.5.5：分类树随「浏览源」变化；v1.5.7 改为按启用源推导 ──
         //   多源混排 → 只显示几个大类（风景/摄影/人物/动漫），不再摆一堆各源能力对不上的子频道；
-        //   锁定单个源 → 显示<b>该源自己的分类</b>（360 的自家分类名 / WallpaperCave 的检索词 / GitHub 的目录词）。
-        var browse = _cfg.BrowseSource;
-        if (string.IsNullOrWhiteSpace(browse))
+        //   启用源恰好一个 → 显示<b>该源自己的分类</b>（360 的自家分类名 / WallpaperCave 的检索词 / GitHub 的目录词）。
+        //   （v1.5.5 的「浏览源单选」UI 已按用户要求移除，单源浏览 = 只勾一个源。）
+        var enabledNow = _sources.Enabled(_cfg);
+        var browse = enabledNow.Count == 1 ? enabledNow[0] : null;
+        if (browse == null)
         {
             foreach (var (title, keys) in Channels.TreeGroups)
             {
@@ -873,8 +995,7 @@ internal sealed class MainForm : Form
         }
         else
         {
-            var src = _sources.Find(browse);
-            var local = src?.SupportedChannels(_cfg) ?? Array.Empty<(string Id, string Name)>();
+            var local = browse.SupportedChannels(_cfg);
             foreach (var (id, name) in local)
                 _tree.Nodes.Add(new TreeNode(name) { Tag = $"local:{id}" });
 

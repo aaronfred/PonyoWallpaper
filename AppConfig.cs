@@ -184,6 +184,17 @@ internal class AppConfig
         }
         cfg.RotationCategories = null;
 
+        // v1.5.7 迁移：「浏览源单选锁定」已随其 UI 一并移除——旧配置里若锁着某个源，
+        // 而菜单上已没有解除入口，会把用户永久锁死在单源。
+        // 锁定的源就是用户实际在浏览的源（EnabledSources 当时被锁定覆盖、处于休眠），
+        // → 迁移为「只勾这一个源」，升级后浏览体验无缝衔接（树仍显示该源自己的分类）。
+        if (!string.IsNullOrEmpty(cfg.BrowseSource))
+        {
+            cfg.EnabledSources = new List<string> { cfg.BrowseSource };
+            cfg.BrowseSource = "";
+            cfg.Save();
+        }
+
         // 迁移：旧版单代理 → 代理池（首项与 ProxyUrl 一致）
         if ((cfg.ProxyUrls == null || cfg.ProxyUrls.Count == 0) && !string.IsNullOrWhiteSpace(cfg.ProxyUrl))
         {

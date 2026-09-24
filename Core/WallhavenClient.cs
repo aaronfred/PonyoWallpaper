@@ -52,6 +52,8 @@ internal sealed class WallhavenClient : IDisposable
     /// </summary>
     public string RewriteThumbAlways(string url)
     {
+        // 内置默认反代有多条时取第一条（缩略图改写需要一个确定的目标，不做链路状态判断）；
+        // 该条若不可达，调用方会回退到 ThumbFallback（GitHub 原图）。
         var mirror = _mirrorRaw.Count > 0 ? _mirrorRaw[0] : DefaultMirror.Url;
         return string.IsNullOrWhiteSpace(mirror) ? url : RewriteWith(url, mirror.TrimEnd('/'));
     }
@@ -84,10 +86,26 @@ internal sealed class WallhavenClient : IDisposable
     public string ActiveProxyName => Current().Kind switch
     {
         EntryKind.Direct => "直连",
-        EntryKind.DefaultMirror => "默认代理",
+        // v1.5.6：内置默认反代有多条，用序号区分主/备（只报序号，不报地址）
+        EntryKind.DefaultMirror => DefaultMirrorRank(Current().Url) is { } r
+            ? $"默认代理{DefaultMirrorSuffix(r)}"
+            : "默认代理",
         EntryKind.Mirror => Current().Url + "（反代直连）",
         _ => Current().Url
     };
+
+    /// <summary>该地址在内置默认反代列表中的序号（0 起）；不是内置地址则返回 null。</summary>
+    private static int? DefaultMirrorRank(string url)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return null;
+        var norm = url.Trim().TrimEnd('/');
+        for (var i = 0; i < DefaultMirror.Urls.Count; i++)
+            if (string.Equals(norm, DefaultMirror.Urls[i], StringComparison.OrdinalIgnoreCase)) return i;
+        return null;
+    }
+
+    /// <summary>0 → ""（主）；1 → "（备1）"；2 → "（备2）" …（仅用于界面/日志文案）</summary>
+    private static string DefaultMirrorSuffix(int rank) => rank == 0 ? "" : $"（备{rank}）";
 
     /// <summary>当前代理地址；直连与内置默认反代都返回空串（默认反代不对外暴露地址）。</summary>
     public string ActiveProxyAddress => Current().Kind switch
@@ -135,7 +153,8 @@ internal sealed class WallhavenClient : IDisposable
         _mirrorRaw = (urls ?? Array.Empty<string>())
             .Where(s => !string.IsNullOrWhiteSpace(s)).Select(s => s.Trim().TrimEnd('/')).ToList();
         _usingDefaultMirror = _mirrorRaw.Count == 0;
-        if (_usingDefaultMirror) _mirrorRaw = new List<string> { DefaultMirror.Url };
+        // v1.5.6：内置默认反代现在是多条（主 + 备用）→ 全部入链，某条被墙/限流时自动滑到下一跳
+        if (_usingDefaultMirror) _mirrorRaw = DefaultMirror.Urls.ToList();
         RebuildChain();
     }
 
@@ -330,12 +349,20 @@ internal sealed class WallhavenClient : IDisposable
     // —— v1.5.5：链路粘性记忆（上次有效的条目跨会话沿用，连不上才轮换）——
     private string _preferredChain = "";
 
-    /// <summary>链路条目的稳定标识（用于记忆；内置默认反代只记占位名，不落地址）。</summary>
+    /// <summary>
+    /// 链路条目的稳定标识（用于记忆；内置默认反代只记占位名 + 序号，<b>不落地址</b>）。
+    ///
+    /// v1.5.6：内置默认反代有多条时必须带序号（<c>mirror:default:N</c>），
+    /// 否则主/备都会记成同一个 <c>mirror:default</c> → ApplyPreferredChain 永远命中主地址，
+    /// 备用地址被记住后重启恢复不了。
+    /// </summary>
     private static string TierKey(in (EntryKind Kind, string Url, string? User, string? Pass) e)
         => e.Kind switch
         {
             EntryKind.Direct => "direct",
-            EntryKind.DefaultMirror => "mirror:default",
+            EntryKind.DefaultMirror => DefaultMirrorRank(e.Url) is { } r
+                ? $"mirror:default:{r}"
+                : "mirror:default",
             EntryKind.Mirror => "mirror:" + e.Url,
             _ => "proxy:" + e.Url
         };
@@ -359,6 +386,13 @@ internal sealed class WallhavenClient : IDisposable
         var idx = -1;
         for (var i = 0; i < _chain.Count; i++)
             if (TierKey(_chain[i]) == _preferredChain) { idx = i; break; }
+
+        // 向后兼容：v1.5.5 及更早只在配置里存了无序号占位 "mirror:default"
+        //（当时内置反代只有一条）→ 视为「主地址」。
+        if (idx < 0 && _preferredChain == "mirror:default")
+            for (var i = 0; i < _chain.Count; i++)
+                if (_chain[i].Kind == EntryKind.DefaultMirror) { idx = i; break; }
+
         if (idx < 0) return;
 
         _chainIdx = idx;
