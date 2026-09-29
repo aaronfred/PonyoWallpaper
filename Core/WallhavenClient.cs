@@ -249,9 +249,12 @@ internal sealed class WallhavenClient : IDisposable
     /// v1.3.1 占用优化：连接池条目 10 分钟周期回收 —— 常驻托盘的长连接会被中间设备
     /// 静默断开，下一次请求撞死连接只能靠 failover 兜底；周期回收让空闲连接自然过期，
     /// 同时避免 Socket 句柄长期堆积。系统代理语义与 HttpClientHandler 一致（默认跟随系统）。
+    /// v1.3.2：连接阶段 5 秒超时 —— 直连 wallhaven 被墙必然连不上，快速失败后链路
+    /// 自动切到默认代理（下载按钮等场景不用再干等 30 秒整体超时）。
     /// </summary>
     private static SocketsHttpHandler NewSocketsHandler() => new()
     {
+        ConnectTimeout = TimeSpan.FromSeconds(5),
         PooledConnectionLifetime = TimeSpan.FromMinutes(10)
     };
 

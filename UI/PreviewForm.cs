@@ -59,6 +59,16 @@ internal sealed class PreviewForm : Form
         ForeColor = Color.FromArgb(220, 220, 220),
         Font = new Font("Microsoft YaHei UI", 9)
     };
+    private readonly Button _btnDownload = new()
+    {
+        Text = "下载",
+        Dock = DockStyle.Right,
+        Width = 64,
+        FlatStyle = FlatStyle.Flat,
+        BackColor = Color.FromArgb(24, 24, 24),
+        ForeColor = Color.FromArgb(220, 220, 220),
+        Font = new Font("Microsoft YaHei UI", 9)
+    };
     private readonly Button _btnClose = new()
     {
         Text = "✕",
@@ -96,6 +106,7 @@ internal sealed class PreviewForm : Form
         _pic.DoubleClick += (_, _) => _ = SetWallpaperAsync();
 
         _btnSet.Click += (_, _) => _ = SetWallpaperAsync();
+        _btnDownload.Click += (_, _) => _ = DownloadAsync();
         _btnFav.Click += (_, _) =>
         {
             var item = _items[_index];
@@ -105,6 +116,7 @@ internal sealed class PreviewForm : Form
 
         _bottom.Controls.Add(_info);
         _bottom.Controls.Add(_btnFav);
+        _bottom.Controls.Add(_btnDownload);
         _bottom.Controls.Add(_btnSet);
 
         _btnClose.Location = new Point(Width - 46, 8);
@@ -196,6 +208,60 @@ internal sealed class PreviewForm : Form
         {
             _btnSet.Enabled = true;
             _btnSet.Text = prev;
+        }
+    }
+
+    /// <summary>
+    /// v1.3.2：下载当前大图 —— 弹窗选择保存位置；优先用缓存里已有的原图（零网络），
+    /// 否则经链路下载（直连 → 默认代理 → 手填代理，直连不可用自动切换）。
+    /// 收藏重建的直链默认 jpg，部分图为 png，jpg 失败回退一次。
+    /// </summary>
+    private async Task DownloadAsync()
+    {
+        var item = _items[_index];
+        var ext = Path.HasExtension(item.Path) ? Path.GetExtension(item.Path) : ".jpg";
+        using var dlg = new SaveFileDialog
+        {
+            Title = "选择下载位置",
+            FileName = $"wallhaven-{item.Id}{ext}",
+            Filter = "图片 (*.jpg;*.jpeg;*.png)|*.jpg;*.jpeg;*.png|所有文件 (*.*)|*.*"
+        };
+        if (dlg.ShowDialog(this) != DialogResult.OK) return;
+
+        _btnDownload.Enabled = false;
+        var prev = _btnDownload.Text;
+        _btnDownload.Text = "下载中…";
+        try
+        {
+            var dst = dlg.FileName;
+            var fromCache = File.Exists(_cache.FullPath(item.Id));
+            if (fromCache)
+            {
+                // 缓存命中：直接复制，零网络等待
+                File.Copy(_cache.FullPath(item.Id), dst, overwrite: true);
+            }
+            else
+            {
+                try { await _api.DownloadAsync(item.Path, dst); }
+                catch when (item.Path.EndsWith(".jpg", StringComparison.OrdinalIgnoreCase)
+                            && item.Path.Contains("/full/", StringComparison.OrdinalIgnoreCase))
+                {
+                    await _api.DownloadAsync(item.Path[..^4] + ".png", dst);
+                }
+            }
+            _cache.Touch(item.Id);
+            _info.Text = $"已下载：{dst}" + (fromCache ? "（来自缓存）" : "");
+            Logger.Info($"download {item.Id} -> {dst}{(fromCache ? " (cache)" : "")}");
+        }
+        catch (Exception ex)
+        {
+            _info.Text = "下载失败：" + ex.Message;
+            Logger.Warn($"download {item.Id}: {ex.Message}");
+        }
+        finally
+        {
+            _btnDownload.Enabled = true;
+            _btnDownload.Text = prev;
         }
     }
 
