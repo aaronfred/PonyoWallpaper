@@ -8,6 +8,8 @@ namespace PonyoWallpaper;
 /// - v1.5.7：取图改走 <see cref="SourceRegistry.FetchMergedAsync"/>（与浏览一致的多源聚合）——
 ///   此前自动更换永远只走 wallhaven，勾了 360/WCV/GitHub 也轮不到它们；
 ///   范围解析随启用源变化：单源 = 该源自己的分类（local:&lt;id&gt;），多源 = wallhaven 频道。
+/// - v1.5.8：范围新增「收藏」（key=fav）—— 从收藏夹随机取图，原图不在缓存则按落盘直链重建；
+///   缓存键统一改用 <see cref="WallpaperItem.StoreId"/>（此前用裸 Id，多源下不同源的 id 会撞）。
 /// </summary>
 internal sealed class RotationEngine : IDisposable
 {
@@ -15,6 +17,7 @@ internal sealed class RotationEngine : IDisposable
     private readonly CacheManager _cache;
     private readonly AppConfig _cfg;
     private readonly SourceRegistry _sources;
+    private readonly ListStore _favs;
     private readonly System.Timers.Timer _timer;
     private WallpaperItem? _current;
     private bool _busy;
@@ -28,9 +31,10 @@ internal sealed class RotationEngine : IDisposable
     /// </summary>
     public void SetCurrent(WallpaperItem item) => _current = item;
 
-    public RotationEngine(AppConfig cfg, WallhavenClient api, CacheManager cache, SourceRegistry sources)
+    public RotationEngine(AppConfig cfg, WallhavenClient api, CacheManager cache, SourceRegistry sources,
+        ListStore favorites)
     {
-        _cfg = cfg; _api = api; _cache = cache; _sources = sources;
+        _cfg = cfg; _api = api; _cache = cache; _sources = sources; _favs = favorites;
         _timer = new System.Timers.Timer { AutoReset = true };
         _timer.Elapsed += async (_, _) => await NextAsync();
         UpdateInterval(cfg.IntervalMinutes);
@@ -55,13 +59,14 @@ internal sealed class RotationEngine : IDisposable
     /// <summary>最近一次轮换实际使用的频道显示名（供状态栏/历史记录）。</summary>
     public string CurrentChannelName { get; private set; } = "";
 
-    /// <summary>一轮解析结果：取图请求 + 显示名 + 是否 NSFW（NSFW 恒走 wallhaven 直连）。</summary>
-    private sealed record RotPlan(SourceFetchRequest Req, string Name, bool NsfwOnly);
+    /// <summary>一轮解析结果：取图请求 + 显示名 + 是否 NSFW（NSFW 恒走 wallhaven 直连）+ 是否收藏轮换。</summary>
+    private sealed record RotPlan(SourceFetchRequest Req, string Name, bool NsfwOnly, bool FromFavs = false);
 
     /// <summary>
     /// 解析本轮自动更换范围：从启用的范围（可多选）中随机取一个。
     /// v1.5.7 按当前启用源过滤存量勾选——
     /// 单源模式只认 <c>local:&lt;id&gt;</c>（该源自己的分类），多源模式只认 wallhaven 频道 key；
+    /// v1.5.8 两种模式都认 <c>fav</c>（收藏）；
     /// 旧配置混入的失效 key 自动忽略，全部失效则兜底「全部」。"nsfw" 恒走 wallhaven（purity=111）。
     /// </summary>
     private RotPlan ResolveRotation()
@@ -79,11 +84,14 @@ internal sealed class RotationEngine : IDisposable
             {
                 var localKeys = locals.Select(x => "local:" + x.Id).ToList();
                 var nameById = locals.ToDictionary(x => x.Id, x => x.Name, StringComparer.OrdinalIgnoreCase);
+                // v1.5.8：收藏（fav）与该源分类平级，都参与轮换池
                 var pool = keys
-                    .Where(k => k.StartsWith("local:", StringComparison.Ordinal) && nameById.ContainsKey(k[6..]))
+                    .Where(k => k == "fav" ||
+                                (k.StartsWith("local:", StringComparison.Ordinal) && nameById.ContainsKey(k[6..])))
                     .ToList();
-                if (pool.Count == 0) pool = localKeys;   // 兜底：该源全部分类
+                if (pool.Count == 0) { pool = localKeys; pool.Add("fav"); }   // 兜底：该源全部分类 + 收藏
                 var pick = pool[Random.Shared.Next(pool.Count)];
+                if (pick == "fav") return FavPlan();
                 var id = pick[6..];
                 return new RotPlan(new SourceFetchRequest
                 {
@@ -99,11 +107,12 @@ internal sealed class RotationEngine : IDisposable
             // 该源没有自有分类体系 → 落到下面的通用频道逻辑
         }
 
-        // 多源模式：wallhaven 频道 key（忽略 local: 残留）
+        // 多源模式：wallhaven 频道 key（忽略 local: 残留；fav 属非 local，自然入池）
         var whKeys = keys.Where(k => !k.StartsWith("local:", StringComparison.Ordinal)).ToList();
         if (whKeys.Count == 0) whKeys = Channels.All.Select(c => c.Key).ToList();
 
         var key = whKeys[Random.Shared.Next(whKeys.Count)];
+        if (key == "fav") return FavPlan();
         if (key == "nsfw")
         {
             return new RotPlan(new SourceFetchRequest
@@ -127,12 +136,56 @@ internal sealed class RotationEngine : IDisposable
         }, ch.Name, false);
     }
 
+    private RotPlan FavPlan() => new(new SourceFetchRequest { ChannelKey = "fav" }, "收藏", false, true);
+
+    /// <summary>
+    /// 收藏轮换的候选集：把收藏落盘记录还原成 WallpaperItem（缓存键 = StoreId）。
+    /// v1.4.0 起记录自带直链；旧记录（无 Path）按 wallhaven 规则回退，无直链可推的跳过。
+    /// </summary>
+    private List<WallpaperItem> FavCandidates()
+    {
+        var items = new List<WallpaperItem>();
+        foreach (var rec in _favs.All())
+        {
+            var (src, rawId) = SplitStoreId(rec.Id, rec.SourceKey);
+            var path = rec.Path;
+            if (string.IsNullOrEmpty(path))
+            {
+                if (src == "wallhaven" && rawId.Length >= 2)
+                    path = $"https://w.wallhaven.cc/full/{rawId[..2]}/wallhaven-{rawId}.jpg";
+                else
+                    continue;
+            }
+            items.Add(new WallpaperItem
+            {
+                SourceKey = src,
+                Id = rawId,
+                Path = path,
+                Thumb = rec.Thumb,
+                Resolution = rec.Resolution,
+                PageUrl = rec.PageUrl
+            });
+        }
+        return items;
+    }
+
+    /// <summary>把收藏落盘键拆回 (源, 原始 id)。wallhaven 是裸 id，其余源为 "源_原始id"。</summary>
+    private static (string Source, string RawId) SplitStoreId(string storeId, string? sourceKey)
+    {
+        var src = string.IsNullOrWhiteSpace(sourceKey) ? "wallhaven" : sourceKey;
+        if (src == "wallhaven") return ("wallhaven", storeId);
+        var prefix = src + "_";
+        return storeId.StartsWith(prefix, StringComparison.Ordinal)
+            ? (src, storeId[prefix.Length..])
+            : (src, storeId);
+    }
+
     /// <summary>立即以当前配置（填充/多屏）重新应用当前壁纸，用于设置即时生效。</summary>
     public void ApplyCurrent()
     {
         try
         {
-            var id = _current?.Id;
+            var id = _current?.StoreId;
             if (id != null && File.Exists(_cache.FullPath(id)))
                 ApplyWallpaper(_cache.FullPath(id));
         }
@@ -227,11 +280,11 @@ internal sealed class RotationEngine : IDisposable
             }
             // 3. 应用
             _current = item;
-            var fullPath = _cache.FullPath(item.Id);
+            var fullPath = _cache.FullPath(item.StoreId);
             if (File.Exists(fullPath) && ApplyWallpaper(fullPath))
             {
                 Logger.Info($"rotated: {item.Id} {item.Resolution} ({item.Purity})");
-                _cache.Touch(item.Id);
+                _cache.Touch(item.StoreId);
                 _cache.EnforceLimit();
                 OnRotated?.Invoke(item);
                 _ = PrefetchAsync();
@@ -246,9 +299,14 @@ internal sealed class RotationEngine : IDisposable
         }
     }
 
-    /// <summary>按轮换计划拉一页候选（NSFW 直连 wallhaven；其余走多源聚合）。</summary>
+    /// <summary>按轮换计划拉一页候选（收藏=本地列表；NSFW 直连 wallhaven；其余走多源聚合）。</summary>
     private async Task<IReadOnlyList<WallpaperItem>?> FetchCandidatesAsync(RotPlan plan)
     {
+        if (plan.FromFavs)
+        {
+            var favs = FavCandidates();
+            return favs.Count > 0 ? favs : null;   // 收藏夹为空 → 走缓存随机兜底
+        }
         var page = Random.Shared.Next(1, 6);
         if (plan.NsfwOnly)
         {
@@ -279,16 +337,29 @@ internal sealed class RotationEngine : IDisposable
         var list = await FetchCandidatesAsync(plan);
         if (list == null || list.Count == 0) return null;
 
-        // 尝试 5 张直到有一张能成功下载（避开偶尔 404 的图）
+        // 尝试 5 张直到有一张能成功下载（避开偶尔 404 的图）。
+        // v1.5.8：缓存键统一用 StoreId（多源下裸 id 会撞）；
+        //         收藏重建的直链默认 jpg，部分图是 png，回退一次（与主窗口收藏重建同款）。
         foreach (var cand in list.OrderBy(_ => Random.Shared.Next()).Take(5))
         {
-            var dst = _cache.FullPath(cand.Id);
+            var dst = _cache.FullPath(cand.StoreId);
             try
             {
                 if (!File.Exists(dst))
                     await _api.DownloadAsync(cand.Path, dst);
-                _cache.Touch(cand.Id);
+                _cache.Touch(cand.StoreId);
                 return cand;
+            }
+            catch when (cand.Path.EndsWith(".jpg", StringComparison.OrdinalIgnoreCase)
+                        && cand.Path.Contains("/full/", StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    await _api.DownloadAsync(cand.Path[..^4] + ".png", dst);
+                    _cache.Touch(cand.StoreId);
+                    return cand;
+                }
+                catch { /* png 也失败，试下一张 */ }
             }
             catch (Exception ex)
             {
@@ -310,12 +381,12 @@ internal sealed class RotationEngine : IDisposable
             if (list == null || list.Count == 0) return;
             foreach (var cand in list.OrderBy(_ => Random.Shared.Next()).Take(3))
             {
-                if (_cache.HasFull(cand.Id)) continue;
-                var dst = _cache.FullPath(cand.Id);
+                if (_cache.HasFull(cand.StoreId)) continue;
+                var dst = _cache.FullPath(cand.StoreId);
                 try
                 {
                     await _api.DownloadAsync(cand.Path, dst);
-                    _cache.Touch(cand.Id);
+                    _cache.Touch(cand.StoreId);
                     Logger.Info($"prefetched: {cand.Id}");
                     return;
                 }

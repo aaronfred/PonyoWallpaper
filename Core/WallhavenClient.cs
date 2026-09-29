@@ -269,6 +269,17 @@ internal sealed class WallhavenClient : IDisposable
     }
 
     /// <summary>按当前链路条目构造 HttpClient：直连/反代 → 直连客户端；代理 → 该代理的客户端。</summary>
+    /// <summary>
+    /// v1.5.8 占用优化（P5）：连接池条目 10 分钟周期回收 —— 常驻托盘的长连接会被中间设备
+    /// 静默断开，下一次请求撞死连接只能靠 failover 兜底；周期回收让空闲连接自然过期，
+    /// 同时避免 Socket 句柄长期堆积。
+    /// </summary>
+    private static SocketsHttpHandler NewSocketsHandler(TimeSpan? connectTimeout) => new()
+    {
+        ConnectTimeout = connectTimeout ?? TimeSpan.FromSeconds(30),
+        PooledConnectionLifetime = TimeSpan.FromMinutes(10)
+    };
+
     private HttpClient BuildClient()
     {
         var e = Current();
@@ -283,16 +294,16 @@ internal sealed class WallhavenClient : IDisposable
         try
         {
             handler = e.Kind == EntryKind.Proxy
-                ? ProxyFactory.Create(e.Url, e.User, e.Pass) ?? new HttpClientHandler()
+                ? ProxyFactory.Create(e.Url, e.User, e.Pass) ?? NewSocketsHandler(null)
                 : e.Kind == EntryKind.Direct
                     // 直连：连接阶段 3s 就放弃（国内直连 wallhaven 必然超时，不能让它拖住首屏）
-                    ? new SocketsHttpHandler { ConnectTimeout = TimeSpan.FromSeconds(3) }
-                    : new HttpClientHandler();
+                    ? NewSocketsHandler(TimeSpan.FromSeconds(3))
+                    : NewSocketsHandler(null);
         }
         catch (Exception ex)
         {
             Logger.Warn($"invalid proxy, fallback to direct: {ex.Message}");
-            handler = new HttpClientHandler();
+            handler = NewSocketsHandler(null);
         }
         _activeMirror = IsMirror(e) ? e.Url : null;
         // v1.5.5：直连整体超时从 30s 收紧到 8s。实测反代完全可用（API 1.7s / 缩略图 0.8s），

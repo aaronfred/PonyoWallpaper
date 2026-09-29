@@ -749,6 +749,15 @@ internal sealed class MainForm : Form
             dd.Items.Add(parent);
         }
 
+        // v1.5.8：收藏也作为独立轮换类目（多源模式无级联分组，直接平铺一项）
+        var fav = new ToolStripMenuItem("收藏")
+        {
+            CheckOnClick = true,
+            Checked = _cfg.RotationChannels?.Contains("fav") == true
+        };
+        fav.CheckedChanged += (_, _) => UpdateRotationChannel("fav", fav.Checked);
+        dd.Items.Add(fav);
+
         if (_cfg.ShowNsfw && HiddenAuth.Unlocked)
         {
             var nsfw = new ToolStripMenuItem("NSFW（需 API Key）")
@@ -781,11 +790,12 @@ internal sealed class MainForm : Form
     private void BuildSingleSourceRotationMenu(
         ToolStripDropDown dd, IWallpaperSource src, IReadOnlyList<(string Id, string Name)> locals)
     {
+        // v1.5.8：收藏（fav）作为一等类目参与全选/清空/反同步，与该源分类平级
         var allKeys = locals.Select(x => "local:" + x.Id).ToList();
+        allKeys.Add("fav");
         var selectedSet = new HashSet<string>(_cfg.RotationChannels ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
-        var nameByItemKey = locals.ToDictionary(x => "local:" + x.Id, x => x.Name, StringComparer.OrdinalIgnoreCase);
 
-        // 顶部「全选」：勾选 = 该源全部分类；取消 = 清空（引擎兜底=全部分类，行为等价）
+        // 顶部「全选」：勾选 = 该源全部分类 + 收藏；取消 = 清空（引擎兜底=全部分类 + 收藏，行为等价）
         var selAll = new ToolStripMenuItem("全选") { CheckOnClick = true };
         selAll.Checked = allKeys.Count > 0 && allKeys.All(selectedSet.Contains);
         var items = new List<ToolStripMenuItem>();
@@ -807,7 +817,7 @@ internal sealed class MainForm : Form
             finally { _buildingRotationMenu--; }
             if (!want)
             {
-                // 清空方向：把 local: 键全部移除（引擎兜底=全部分类）
+                // 清空方向：把 local:/fav 键全部移除（引擎兜底=全部分类 + 收藏）
                 var remain = (_cfg.RotationChannels ?? new List<string>())
                     .Where(k => !allKeys.Contains(k, StringComparer.OrdinalIgnoreCase))
                     .ToList();
@@ -820,6 +830,22 @@ internal sealed class MainForm : Form
         };
         dd.Items.Add(selAll);
         dd.Items.Add(new ToolStripSeparator());
+
+        // v1.5.8：「收藏」固定最前（与左侧分类树的收藏节点同序）
+        var favItem = new ToolStripMenuItem("收藏")
+        {
+            CheckOnClick = true,
+            Checked = selectedSet.Contains("fav"),
+            Tag = "fav"
+        };
+        items.Add(favItem);
+        favItem.CheckedChanged += (_, _) =>
+        {
+            UpdateRotationChannel("fav", favItem.Checked);
+            if (_buildingRotationMenu > 0) return;
+            SyncSingleSourceSelAll(selAll, allKeys);
+        };
+        dd.Items.Add(favItem);
 
         foreach (var (id, name) in locals)
         {
@@ -838,14 +864,7 @@ internal sealed class MainForm : Form
                 UpdateRotationChannel(itemKey, item.Checked);
                 if (_buildingRotationMenu > 0) return;
                 // 反向同步「全选」自身
-                var now = new HashSet<string>(_cfg.RotationChannels ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
-                var all = allKeys.All(now.Contains);
-                if (selAll.Checked != all)
-                {
-                    _syncingSelectAll = true;
-                    try { selAll.Checked = all; }
-                    finally { _syncingSelectAll = false; }
-                }
+                SyncSingleSourceSelAll(selAll, allKeys);
             };
             dd.Items.Add(item);
         }
@@ -865,6 +884,17 @@ internal sealed class MainForm : Form
         }
 
         dd.Closing += MenuClosingHandler;
+    }
+
+    /// <summary>单源菜单子项（分类 / 收藏）变化后，按 allKeys 反向同步「全选」自身勾选状态。</summary>
+    private void SyncSingleSourceSelAll(ToolStripMenuItem selAll, List<string> allKeys)
+    {
+        var now = new HashSet<string>(_cfg.RotationChannels ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
+        var all = allKeys.All(now.Contains);
+        if (selAll.Checked == all) return;
+        _syncingSelectAll = true;
+        try { selAll.Checked = all; }
+        finally { _syncingSelectAll = false; }
     }
 
     /// <summary>菜单关闭拦截：ItemClicked 取消（可连续勾选），其余（完成/外部/Esc）自动保存并关闭。</summary>
@@ -920,7 +950,8 @@ internal sealed class MainForm : Form
     {
         var selected = _cfg.RotationChannels ?? new List<string>();
 
-        // v1.5.7 单源模式：勾选存为 local:<id> → 显示该源分类名；全选时显示源名
+        // v1.5.7 单源模式：勾选存为 local:<id> → 显示该源分类名；v1.5.8 加收藏（fav）；
+        // 全部分类（不含收藏）时显示源名，收藏另选时追加「+ 收藏」
         var enabledNow = _sources.Enabled(_cfg);
         if (enabledNow.Count == 1)
         {
@@ -929,9 +960,11 @@ internal sealed class MainForm : Form
             {
                 var nameByKey = locals.ToDictionary(x => "local:" + x.Id, x => x.Name, StringComparer.OrdinalIgnoreCase);
                 var names = selected.Where(nameByKey.ContainsKey).Select(k => nameByKey[k]).ToList();
+                var favOn = selected.Contains("fav");
                 var allOn = locals.All(x => selected.Contains("local:" + x.Id, StringComparer.OrdinalIgnoreCase));
-                _btnRotScope.Text = allOn && names.Count > 0 ? enabledNow[0].DisplayName
-                    : names.Count > 0 ? string.Join(" + ", names)
+                _btnRotScope.Text = allOn && names.Count > 0
+                    ? enabledNow[0].DisplayName + (favOn ? " + 收藏" : "")
+                    : names.Count > 0 || favOn ? string.Join(" + ", favOn ? names.Prepend("收藏") : names)
                     : "点击选择频道…";
                 return;
             }
@@ -945,6 +978,7 @@ internal sealed class MainForm : Form
             if (n == keys.Length) parts.Add(title);
             else if (n > 0) parts.Add($"{title}{n}");
         }
+        if (selected.Contains("fav")) parts.Add("收藏");
         if (selected.Contains("nsfw")) parts.Add("NSFW");
         _btnRotScope.Text = parts.Count > 0 ? string.Join(" + ", parts) : "点击选择频道…";
     }
@@ -1049,16 +1083,54 @@ internal sealed class MainForm : Form
         {
             LeaveNsfwSession();
             ReleaseCardsForBackground();
+            StartBackgroundTrim();
         }
         else if (WindowState == FormWindowState.Normal && Visible && _releasedForBackground)
         {
             // 从托盘恢复：缩略图已释放，重新拉回当前频道
             _releasedForBackground = false;
+            _trimTimer?.Stop();   // 取消后台修剪（已回前台）
             Reload();
         }
     }
 
     private bool _releasedForBackground;
+    private System.Windows.Forms.Timer? _trimTimer;
+
+    /// <summary>
+    /// v1.5.8 后台占用优化：缩到托盘 10 分钟后做一次 GC 压缩 + 工作集修剪（P3）。
+    /// 频繁修剪反而增加重载开销，故只做一次；恢复窗口即取消。
+    /// </summary>
+    private void StartBackgroundTrim()
+    {
+        _trimTimer ??= new System.Windows.Forms.Timer { Interval = 10 * 60 * 1000 };
+        if (_trimTimer.Enabled) return;
+        _trimTimer.Tick += (_, _) =>
+        {
+            _trimTimer!.Stop();
+            if (Visible) return;   // 用户已回到前台，不打扰
+            try
+            {
+                GC.Collect(2, GCCollectionMode.Aggressive, blocking: true, compacting: true);
+                GC.WaitForPendingFinalizers();
+                TrimWorkingSet();
+                Logger.Info("background trim: gc compacted + working set trimmed");
+            }
+            catch { /* 修剪失败不影响主流程 */ }
+        };
+        _trimTimer.Start();
+    }
+
+    [System.Runtime.InteropServices.DllImport("psapi.dll", SetLastError = true)]
+    private static extern bool EmptyWorkingSet(IntPtr hProcess);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    private static extern IntPtr GetCurrentProcess();
+
+    private static void TrimWorkingSet()
+    {
+        try { EmptyWorkingSet(GetCurrentProcess()); } catch { /* 部分环境受限，跳过 */ }
+    }
 
     /// <summary>缩到托盘后释放全部卡片与缩略图，让后台常驻内存回到基线。
     /// 此前最小化只是 Hide 窗口，缩略图仍全部常驻，后台占用因此居高不下。</summary>

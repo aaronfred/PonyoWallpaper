@@ -36,7 +36,8 @@ internal static class Program
                 using var api = new WallhavenClient(cfg.ApiKey, cfg.ProxyUrl, cfg.ProxyUser, cfg.ProxyPassword, cfg.ProxyUrls);
                 api.SetMirrors(cfg.CfProxyUrls);
                 var cache = new CacheManager(AppPaths.CacheFullDir, AppPaths.CacheThumbDir, cfg.CacheLimitMb);
-                var engine = new RotationEngine(cfg, api, cache, new SourceRegistry(api));
+                var engine = new RotationEngine(cfg, api, cache, new SourceRegistry(api),
+                    new ListStore(AppPaths.FavoritesFile));
                 var item = engine.NextAsync().GetAwaiter().GetResult();
                 Logger.Info($"test-rotate => {(item == null ? "FAIL" : "OK " + item.Id + " " + item.Resolution)}");
             }
@@ -117,9 +118,9 @@ internal static class Program
             api.AttachConfig(cfg);           // v1.5.2：非 wallhaven 资源下载走通用链路（镜像 + 代理）
             var cache = new CacheManager(AppPaths.CacheFullDir, AppPaths.CacheThumbDir, cfg.CacheLimitMb);
             var sources = new SourceRegistry(api);
-            var engine = new RotationEngine(cfg, api, cache, sources);
-            var history = new HistoryStore();
             var favorites = new ListStore(AppPaths.FavoritesFile);
+            var engine = new RotationEngine(cfg, api, cache, sources, favorites);
+            var history = new HistoryStore();
             var blacklist = new ListStore(AppPaths.BlacklistFile);
 
             // v1.4.2：公共代理池的抓取/保活/扫描模式已随代理管理拆分至独立工具 ProxyToolkit。
@@ -173,7 +174,7 @@ internal static class Program
             engine.OnRotated += item =>
             {
                 mainForm.InvokeSetStatus($"已应用 · {item.Id} · {item.Resolution}");
-                history.Append(item, engine.CurrentChannelName, cache.FullPath(item.Id));
+                history.Append(item, engine.CurrentChannelName, cache.FullPath(item.StoreId));   // v1.5.8: StoreId 与引擎/主窗一致
                 UpdateTooltip(item);
             };
 

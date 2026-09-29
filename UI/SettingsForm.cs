@@ -21,13 +21,11 @@ internal sealed class SettingsForm : Form
     private readonly NumericUpDown _cacheLimit = new();
     private readonly CheckBox _autostart = new();
     private readonly CheckBox _startMinimized = new();
-    // v1.2.0：当前代理 = 一个可编辑文本框（显示当前生效代理，也可直接手填）+ 下方等宽状态条
-    private readonly TextBox _txtProxy = new();
+    // v1.5.8：手填代理框（代理管理）已移除 —— 自定义代理改在配置文件 ManualProxy 字段填写
+    // （见「代理填写指南」），设置页只保留状态展示 + 恢复默认代理 + 指南入口。
     private readonly Label _lblProxyInfo = new();
     // v1.4.0 壁纸源 API Key 已随需 Key 源一并移除（v1.5.0）
     private int? _lastLatency;          // 最近一次实测延迟（null = 未测，-1 = 不可达）
-    private readonly System.Windows.Forms.Timer _proxyTimer = new() { Interval = 800 };
-    private bool _applyingProxy;        // 程序回填文本框时抑制其 TextChanged 自动应用
     private const int LatencyThresholdMs = 2000;   // 延迟阈值（实测正常值约 840ms）
     private readonly System.Windows.Forms.Timer _uiTimer = new() { Interval = 5000 };
     private readonly ComboBox _theme = new();
@@ -57,7 +55,7 @@ internal sealed class SettingsForm : Form
 
         Build();
         LoadValues();
-        _uiTimer.Tick += (_, _) => { if (!_txtProxy.Focused) UpdateProxyUi(); };
+        _uiTimer.Tick += (_, _) => UpdateProxyUi();
         _uiTimer.Start();
         // 打开设置页即实测一次当前链路延迟（v1.2.0 需求 4）
         Shown += (_, _) => _ = RefreshLatencyAsync();
@@ -77,39 +75,28 @@ internal sealed class SettingsForm : Form
         var y = 16;
         y = PlaceRow(rows, y, "缓存配额（MB）", _cacheLimit);
 
-        // 当前代理（v1.2.0 / v1.4.2）：两行，右列各一个按钮。
-        //   第一行：可编辑文本框（显示当前生效代理，也可直接手填）+「恢复默认代理」
-        //   第二行：状态条（类型 + 延迟）+「代理指引」
-        // v1.5.3：两个按钮<b>互换位置</b>（按用户要求）—— 常用的"恢复默认"提到第一行与输入框同排，
-        //         「代理指引」下移到状态条旁（属说明性入口，频次低）。
-        // 内置默认反代（隐藏）在用时，文本框只显示提示语、不暴露地址。
+        // 当前代理（v1.5.8 重排）：手填代理框已移除，本区只剩展示与两个入口。
+        //   第一行：状态条（类型 + 延迟，占满左列）+「恢复默认代理」
+        //   第二行：「代理填写指南」（代理示例 / 反代搭建 / 代码，打开内嵌 txt）
+        // 内置默认反代（隐藏）在用时，状态条只报「默认代理」，不暴露地址。
         var proxyPanel = new Panel { Width = 340, Height = 52 };
-        _txtProxy.SetBounds(0, 0, 240, 26);   // 与上方「缓存配额」等宽，右缘对齐
-        _txtProxy.Font = new Font("Microsoft YaHei UI", 9);
-        _txtProxy.PlaceholderText = "留空=自动；可手填 socks5://127.0.0.1:7890";
-        _txtProxy.TextChanged += (_, _) =>
-        {
-            if (_applyingProxy || _loadingValues) return;
-            _proxyTimer.Stop(); _proxyTimer.Start();   // 停手 800ms 自动应用
-        };
-        _txtProxy.Leave += (_, _) => { _proxyTimer.Stop(); ApplyProxyInput(); };
-        _proxyTimer.Tick += (_, _) => { _proxyTimer.Stop(); ApplyProxyInput(); };
 
-        // 代理指引：打开内嵌的「代理指引」（http/socks/反代 填写规则、示例与搭建指南）
+        // 代理填写指南：各种代理填写示例（HTTP / SOCKS5 / 配置文件字段）+ 反代搭建指南 + 示例代码
         var btnGuide = new Button
         {
-            Text = "代理指引",
-            Bounds = new Rectangle(248, 28, 92, 24),
-            Font = new Font("Microsoft YaHei UI", 9),
-            FlatStyle = FlatStyle.Flat
+            Text = "代理填写指南（示例 · 反代搭建 · 代码）",
+            Bounds = new Rectangle(0, 28, 240, 24),
+            Font = new Font("Microsoft YaHei UI", 8.25f),
+            FlatStyle = FlatStyle.Flat,
+            TextAlign = ContentAlignment.MiddleCenter
         };
         btnGuide.FlatAppearance.BorderSize = 1;
         btnGuide.FlatAppearance.BorderColor = Color.FromArgb(200, 200, 200);
         btnGuide.Click += (_, _) => OpenProxyGuide();
 
-        // 状态条：与文本框等宽，显示代理类型与实测延迟；超阈值时追加提示。
+        // 状态条：与文本框原位等宽，显示代理类型与实测延迟；超阈值时追加提示。
         // Tag="self"：颜色由 UpdateProxyUi 按状态+主题自管，ThemeManager 不接管（否则深色下白底刺眼）
-        _lblProxyInfo.SetBounds(0, 28, 240, 24);
+        _lblProxyInfo.SetBounds(0, 0, 240, 26);
         _lblProxyInfo.AutoSize = false;
         _lblProxyInfo.TextAlign = ContentAlignment.MiddleLeft;
         _lblProxyInfo.Font = new Font("Microsoft YaHei UI", 8);
@@ -117,7 +104,7 @@ internal sealed class SettingsForm : Form
         _lblProxyInfo.ForeColor = Color.FromArgb(105, 105, 105);
         _lblProxyInfo.BackColor = Color.FromArgb(245, 245, 245);
 
-        // 恢复默认代理：清掉自定义反代与手填代理，回到内置默认代理
+        // 恢复默认代理：清掉自定义反代与配置文件里的手填代理，回到内置默认代理
         var btnRestoreDefault = new Button
         {
             Text = "恢复默认代理",
@@ -129,15 +116,13 @@ internal sealed class SettingsForm : Form
         btnRestoreDefault.FlatAppearance.BorderColor = Color.FromArgb(200, 200, 200);
         btnRestoreDefault.Click += (_, _) => RestoreDefaultProxy();
 
-        proxyPanel.Controls.Add(_txtProxy);
         proxyPanel.Controls.Add(btnGuide);
         proxyPanel.Controls.Add(_lblProxyInfo);
         proxyPanel.Controls.Add(btnRestoreDefault);
         y = PlaceRow(rows, y, "当前代理", proxyPanel, 52);
         proxyPanel.Size = new Size(340, 52);
-        _tips.SetToolTip(btnGuide, "查看代理填写规则与示例（http / socks5 / 反代）及反代搭建指南");
-        _tips.SetToolTip(_txtProxy, "显示当前生效的代理；可直接手填（socks5:// 或 http://，可含 user:pass@）并自动锁定使用；清空则回到自动链路");
-        _tips.SetToolTip(btnRestoreDefault, "清除自定义反代与手填代理，回到内置默认代理（原配置将被覆盖）");
+        _tips.SetToolTip(btnGuide, "各种代理填写示例（含配置文件字段写法）、Cloudflare Worker / Caddy / Nginx 反代搭建指南与代码");
+        _tips.SetToolTip(btnRestoreDefault, "清除自定义反代与手填代理（配置文件 ManualProxy），回到内置默认代理");
 
         // v1.5.0：需要 API Key 的壁纸源（Unsplash / Pexels / Pixabay）已移除，
         // 现源为 wallhaven / 360 壁纸 / WallpaperCave，均免注册，故不再有「壁纸源 Key」行。
@@ -451,7 +436,6 @@ internal sealed class SettingsForm : Form
             _cacheLimit.Value = Math.Clamp(_cfg.CacheLimitMb, 100, 10240);
             _autostart.Checked = AutostartHelper.IsEnabled();
             _startMinimized.Checked = _cfg.StartMinimized;
-            _txtProxy.Text = _cfg.ManualProxy ?? "";
             _theme.SelectedIndex = Math.Clamp(_cfg.Theme, 0, 2);
             _apiKey.Text = _cfg.ApiKey;
             _chkShowNsfw.Checked = _cfg.ShowNsfw;
@@ -469,22 +453,11 @@ internal sealed class SettingsForm : Form
     }
 
     /// <summary>
-    /// 刷新代理区：文本框显示当前生效的代理地址（用户正在输入时不覆盖），
-    /// 状态条显示「类型 + 延迟」，超阈值时追加提示。
+    /// 刷新代理区状态条：显示「类型 + 延迟」，超阈值时追加提示。
+    /// v1.5.8：手填代理框已移除，本方法只剩状态展示。
     /// </summary>
     private void UpdateProxyUi()
     {
-        // 内置默认反代在用时，文本框留空只显示提示语 —— 不把地址摆到界面上（避免被抄走滥用）
-        _txtProxy.PlaceholderText = _api.UsingDefaultMirror
-            ? "当前使用默认代理 · 填自己的代理可覆盖"
-            : "留空=自动；可手填 socks5://127.0.0.1:7890";
-        if (!_txtProxy.Focused)
-        {
-            _applyingProxy = true;
-            var addr = _api.ActiveProxyAddress;   // 默认反代返回空串 → 走占位提示
-            if (_txtProxy.Text != addr) _txtProxy.Text = addr;
-            _applyingProxy = false;
-        }
         var lat = _lastLatency switch
         {
             null => "未测",
@@ -504,21 +477,16 @@ internal sealed class SettingsForm : Form
     }
 
     /// <summary>
-    /// 恢复默认代理：清掉自定义反代 + 手填代理，回到内置默认反代（隐藏资源）。
+    /// 恢复默认代理：清掉自定义反代 + 配置文件里的手填代理，回到内置默认反代（隐藏资源）。
+    /// v1.5.8：手填代理框已移除，此按钮是清除 ManualProxy 的唯一 UI 入口。
     /// </summary>
     private void RestoreDefaultProxy()
     {
-        _applyingProxy = true;
-        try
-        {
-            _txtProxy.Text = "";
-            _cfg.ManualProxy = "";
-            _cfg.ManualProxyLocked = false;
-            _cfg.CfProxyUrl = "";
-            _cfg.CfProxyUrls = null;   // 空 = 用内置默认反代
-            _cfg.Save();
-        }
-        finally { _applyingProxy = false; }
+        _cfg.ManualProxy = "";
+        _cfg.ManualProxyLocked = false;
+        _cfg.CfProxyUrl = "";
+        _cfg.CfProxyUrls = null;   // 空 = 用内置默认反代
+        _cfg.Save();
 
         _api.SetManualProxy("", false);
         _api.SetMirrors(null);
@@ -539,55 +507,7 @@ internal sealed class SettingsForm : Form
     }
 
     /// <summary>
-    /// 应用文本框里的代理（手填后自动触发：停手 800ms 或失焦）。
-    /// 有值 → 实测后锁定使用；不可用 → 不静默降级，状态条提示换回默认代理；
-    /// 空值 → 退出锁定、回到自动链路（替代原「恢复自动」按钮）。
-    /// </summary>
-    private async Task ApplyProxyInput()
-    {
-        if (_applyingProxy || _loadingValues) return;
-        var url = _txtProxy.Text.Trim();
-
-        if (url.Length == 0)
-        {
-            if (_cfg.ManualProxyLocked || (_cfg.ManualProxy ?? "").Length > 0)
-            {
-                _cfg.ManualProxy = "";
-                _cfg.ManualProxyLocked = false;
-                _cfg.Save();
-                _api.SetManualProxy("", false);
-                _onProxyChanged?.Invoke();
-            }
-            await RefreshLatencyAsync();
-            return;
-        }
-
-        _lblProxyInfo.Text = "正在测试该代理…";
-        var r = await ProxyTester.ProbeAsync(new[] { url }, 1, 6);
-        if (IsDisposed) return;
-
-        _cfg.ManualProxy = url;
-        if (r.Count == 0)
-        {
-            _cfg.ManualProxyLocked = false;
-            _cfg.Save();
-            _api.SetManualProxy(url, false);
-            _lastLatency = -1;
-            UpdateProxyUi();
-            _lblProxyInfo.Text = "类型：手填代理    延迟：不可用    ⚠ 换默认";
-            _lblProxyInfo.ForeColor = Color.FromArgb(196, 90, 48);
-            return;
-        }
-
-        _cfg.ManualProxyLocked = true;
-        _cfg.Save();
-        _api.SetManualProxy(url, true);
-        _onProxyChanged?.Invoke();
-        await RefreshLatencyAsync();
-    }
-
-    /// <summary>
-    /// 打开「代理指引」（http / socks5 / 反代 的填写规则、示例与搭建指南）。
+    /// 打开「代理填写指南」（各种代理填写示例、反代搭建指南与示例代码）。
     /// 依次尝试 exe 同目录 → docs 子目录；都没有则从内嵌资源释放后再打开。
     /// </summary>
     /// <summary>
@@ -807,11 +727,4 @@ internal sealed class SettingsForm : Form
 
 
 
-    private static string Short(string msg)
-    {
-        msg = msg.Replace("\r", " ").Replace("\n", " ");
-        return msg.Length <= 160 ? msg : msg[..157] + "…";
-    }
-
-    private Cursor? _cursor;
 }
