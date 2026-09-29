@@ -245,6 +245,16 @@ internal sealed class WallhavenClient : IDisposable
     }
 
     /// <summary>按当前链路条目构造 HttpClient：直连/反代 → 直连客户端；代理 → 该代理的客户端。</summary>
+    /// <summary>
+    /// v1.3.1 占用优化：连接池条目 10 分钟周期回收 —— 常驻托盘的长连接会被中间设备
+    /// 静默断开，下一次请求撞死连接只能靠 failover 兜底；周期回收让空闲连接自然过期，
+    /// 同时避免 Socket 句柄长期堆积。系统代理语义与 HttpClientHandler 一致（默认跟随系统）。
+    /// </summary>
+    private static SocketsHttpHandler NewSocketsHandler() => new()
+    {
+        PooledConnectionLifetime = TimeSpan.FromMinutes(10)
+    };
+
     private HttpClient BuildClient()
     {
         var e = Current();
@@ -259,13 +269,13 @@ internal sealed class WallhavenClient : IDisposable
         try
         {
             handler = e.Kind == EntryKind.Proxy
-                ? ProxyFactory.Create(e.Url, e.User, e.Pass) ?? new HttpClientHandler()
-                : new HttpClientHandler();
+                ? ProxyFactory.Create(e.Url, e.User, e.Pass) ?? NewSocketsHandler()
+                : NewSocketsHandler();
         }
         catch (Exception ex)
         {
             Logger.Warn($"invalid proxy, fallback to direct: {ex.Message}");
-            handler = new HttpClientHandler();
+            handler = NewSocketsHandler();
         }
         _activeMirror = IsMirror(e) ? e.Url : null;
         var c = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(30) };

@@ -528,6 +528,18 @@ internal sealed class MainForm : Form
             dd.Items.Add(parent);
         }
 
+        // v1.3.1：收藏也作为独立轮换类目（随机应用收藏夹里的图）
+        var fav = new ToolStripMenuItem("收藏")
+        {
+            CheckOnClick = true,
+            Checked = _cfg.RotationChannels?.Contains("fav") == true
+        };
+        fav.CheckedChanged += (_, _) =>
+        {
+            UpdateRotationChannel("fav", fav.Checked);
+        };
+        dd.Items.Add(fav);
+
         if (_cfg.ShowNsfw && HiddenAuth.Unlocked)
         {
             var nsfw = new ToolStripMenuItem("NSFW（需 API Key）")
@@ -628,6 +640,7 @@ internal sealed class MainForm : Form
             if (n == keys.Length) parts.Add(title);
             else if (n > 0) parts.Add($"{title}{n}");
         }
+        if (selected.Contains("fav")) parts.Add("收藏");
         if (selected.Contains("nsfw")) parts.Add("NSFW");
         _btnRotScope.Text = parts.Count > 0 ? string.Join(" + ", parts) : "点击选择频道…";
     }
@@ -719,16 +732,54 @@ internal sealed class MainForm : Form
         {
             LeaveNsfwSession();
             ReleaseCardsForBackground();
+            StartBackgroundTrim();
         }
         else if (WindowState == FormWindowState.Normal && Visible && _releasedForBackground)
         {
             // 从托盘恢复：缩略图已释放，重新拉回当前频道
             _releasedForBackground = false;
+            _trimTimer?.Stop();   // 取消后台修剪（已回前台）
             Reload();
         }
     }
 
     private bool _releasedForBackground;
+    private System.Windows.Forms.Timer? _trimTimer;
+
+    /// <summary>
+    /// v1.3.1 后台占用优化：缩到托盘 10 分钟后做一次 GC 压缩 + 工作集修剪。
+    /// 频繁修剪反而增加重载开销，故只做一次；恢复窗口即取消。
+    /// </summary>
+    private void StartBackgroundTrim()
+    {
+        _trimTimer ??= new System.Windows.Forms.Timer { Interval = 10 * 60 * 1000 };
+        if (_trimTimer.Enabled) return;
+        _trimTimer.Tick += (_, _) =>
+        {
+            _trimTimer!.Stop();
+            if (Visible) return;   // 用户已回到前台，不打扰
+            try
+            {
+                GC.Collect(2, GCCollectionMode.Aggressive, blocking: true, compacting: true);
+                GC.WaitForPendingFinalizers();
+                TrimWorkingSet();
+                Logger.Info("background trim: gc compacted + working set trimmed");
+            }
+            catch { /* 修剪失败不影响主流程 */ }
+        };
+        _trimTimer.Start();
+    }
+
+    [System.Runtime.InteropServices.DllImport("psapi.dll", SetLastError = true)]
+    private static extern bool EmptyWorkingSet(IntPtr hProcess);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    private static extern IntPtr GetCurrentProcess();
+
+    private static void TrimWorkingSet()
+    {
+        try { EmptyWorkingSet(GetCurrentProcess()); } catch { /* 部分环境受限，跳过 */ }
+    }
 
     /// <summary>缩到托盘后释放全部卡片与缩略图，让后台常驻内存回到基线。
     /// 此前最小化只是 Hide 窗口，缩略图仍全部常驻，后台占用因此居高不下。</summary>
@@ -1063,8 +1114,17 @@ internal sealed class MainForm : Form
             // 必须缩放到显示尺寸再交付卡片：原图 300x200 解码后 234KB/张，而卡片只显示 190px 宽。
             // 原样 Clone 会让无限下拉累积出上百 MB（实测浏览后私有内存 63MB → 233MB）。
             // 缩到 240px 宽（卡片 190px 的 1.26x 余量，兼容高分屏），单张降到约 150KB。
-            var scaledH = Math.Max(1, (int)(240.0 / img.Width * img.Height));
-            var copy = new Bitmap(img, new Size(240, scaledH));
+            // v1.3.1：缓存小图本身 ≤240px 时直接克隆交付，省一次无谓的缩放位图与 GC 压力。
+            Bitmap copy;
+            if (img.Width > 240)
+            {
+                var scaledH = Math.Max(1, (int)(240.0 / img.Width * img.Height));
+                copy = new Bitmap(img, new Size(240, scaledH));
+            }
+            else
+            {
+                copy = (Bitmap)img.Clone();
+            }
 
             if (IsHandleCreated && !IsDisposed)
             {

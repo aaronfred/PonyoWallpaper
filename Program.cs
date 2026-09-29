@@ -65,10 +65,7 @@ internal static class Program
                 using var api = new WallhavenClient(cfg.ApiKey, cfg.ProxyUrl, cfg.ProxyUser, cfg.ProxyPassword, cfg.ProxyUrls);
                 api.SetMirrors(cfg.CfProxyUrls);
                 var cache = new CacheManager(AppPaths.CacheFullDir, AppPaths.CacheThumbDir, cfg.CacheLimitMb);
-                // 用户代理为空（默认态）或公共池过期时，先自动探测公共代理池再测试，
-                // 使自检不依赖任何手动配置
-                ProxyTester.EnsurePublicPoolAsync(cfg, api).GetAwaiter().GetResult();
-                var engine = new RotationEngine(cfg, api, cache);
+                var engine = new RotationEngine(cfg, api, cache, new ListStore(AppPaths.FavoritesFile));
                 var item = engine.NextAsync().GetAwaiter().GetResult();
                 Logger.Info($"test-rotate => {(item == null ? "FAIL" : "OK " + item.Id + " " + item.Resolution)}");
             }
@@ -146,33 +143,14 @@ internal static class Program
             api.SetMirrors(cfg.CfProxyUrls); // CF 反代：启用后对应链路直连反代
             api.SetManualProxy(cfg.ManualProxy, cfg.ManualProxyLocked); // v1.2.0：手填代理锁定（重启后保持）
             var cache = new CacheManager(AppPaths.CacheFullDir, AppPaths.CacheThumbDir, cfg.CacheLimitMb);
-            var engine = new RotationEngine(cfg, api, cache);
-            var history = new HistoryStore();
             var favorites = new ListStore(AppPaths.FavoritesFile);
+            var engine = new RotationEngine(cfg, api, cache, favorites);
+            var history = new HistoryStore();
             var blacklist = new ListStore(AppPaths.BlacklistFile);
 
-            // v1.2.0：代理扫描默认 Quiet（不自动外连大量代理节点，避免企业网络告警），仅手动触发。
-            // 唯一例外：完全没有任何可用链路时自动跑一次，保证开箱可用。
-            // v1.3.0：内置默认反代（隐藏）始终存在 → 开箱即有链路，该例外实际不再触发。
-            // 模式见 docs/v1.2.0-优化方案.md 2.5.2：off / quiet(默认) / normal / aggressive
-            var scanMode = (cfg.ProxyScanMode ?? "quiet").ToLowerInvariant();
-            var hasAnyLink = true;   // 内置默认反代兜底：任何情况下都至少有一条可用链路
-            var poolEmpty = (cfg.PublicProxyUrls?.Count ?? 0) == 0;
-            var autoScan = scanMode is "normal" or "aggressive"
-                           || (scanMode != "off" && !hasAnyLink && poolEmpty);
-            if (autoScan)
-            {
-                Logger.Info($"public pool auto scan (mode={scanMode}, firstRunNoLink={!hasAnyLink && poolEmpty})");
-                _ = ProxyTester.EnsurePublicPoolAsync(cfg, api);
-            }
-            // 免费代理寿命以小时计：每 6 小时后台保活一次（仅 normal/aggressive 自动执行；quiet/off 需手动）
-            using var poolKeepAlive = new System.Threading.Timer(
-                _ =>
-                {
-                    if (scanMode is not ("normal" or "aggressive")) return;
-                    try { ProxyTester.EnsurePublicPoolAsync(cfg, api).GetAwaiter().GetResult(); } catch { /* 静默 */ }
-                },
-                null, TimeSpan.FromHours(6), TimeSpan.FromHours(6));
+            // v1.3.1：代理管理（公共代理池抓取/保活/扫描模式）已移除。
+            // 链路固定为：直连 → 反代（自定义或内置默认）→ 手填代理，开箱即有可用链路；
+            // 公共代理池等需求由独立工具 ProxyToolkit 承接。
 
             using var mainForm = new MainForm(cfg, api, cache, engine, history, favorites, blacklist);
             ThemeManager.Apply(mainForm, ThemeManager.ShouldUseDark(cfg.Theme));

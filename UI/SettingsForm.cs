@@ -76,9 +76,11 @@ internal sealed class SettingsForm : Form
         var y = 16;
         y = PlaceRow(rows, y, "缓存配额（MB）", _cacheLimit);
 
-        // 当前代理（v1.2.0 / v1.3.0）：两行，右列各一个按钮。
-        //   第一行：可编辑文本框（显示当前生效代理，也可直接手填）+「优选代理」
-        //   第二行：状态条（类型 + 延迟）+「恢复默认代理」
+        // 当前代理（v1.2.0 / v1.3.1）：两行，右列各一个按钮。
+        //   第一行：可编辑文本框（显示当前生效代理，也可直接手填）+「恢复默认代理」
+        //   第二行：状态条（类型 + 延迟）+「代理填写指南」
+        // v1.3.1：原「优选代理」换成「恢复默认代理」，原「恢复默认代理」位置放「代理填写指南」；
+        //         「代理管理…」（代理池）入口随代理管理功能一并移除。手填框保持不变。
         // 内置默认反代（隐藏）在用时，文本框只显示提示语、不暴露地址。
         var proxyPanel = new Panel { Width = 340, Height = 52 };
         _txtProxy.SetBounds(0, 0, 240, 26);   // 与上方「缓存配额」等宽，右缘对齐
@@ -92,16 +94,17 @@ internal sealed class SettingsForm : Form
         _txtProxy.Leave += (_, _) => { _proxyTimer.Stop(); ApplyProxyInput(); };
         _proxyTimer.Tick += (_, _) => { _proxyTimer.Stop(); ApplyProxyInput(); };
 
-        var btnPickBest = new Button
+        // 恢复默认代理：清掉自定义反代与手填代理，回到内置默认代理（v1.3.1 提到第一行）
+        var btnRestoreDefault = new Button
         {
-            Text = "优选代理",
+            Text = "恢复默认代理",
             Bounds = new Rectangle(248, 0, 92, 26),
             Font = new Font("Microsoft YaHei UI", 9),
             FlatStyle = FlatStyle.Flat
         };
-        btnPickBest.FlatAppearance.BorderSize = 1;
-        btnPickBest.FlatAppearance.BorderColor = Color.FromArgb(200, 200, 200);
-        btnPickBest.Click += async (_, _) => await PickBestProxyAsync(btnPickBest);
+        btnRestoreDefault.FlatAppearance.BorderSize = 1;
+        btnRestoreDefault.FlatAppearance.BorderColor = Color.FromArgb(200, 200, 200);
+        btnRestoreDefault.Click += (_, _) => RestoreDefaultProxy();
 
         // 状态条：与文本框等宽，显示代理类型与实测延迟；超阈值时追加提示
         _lblProxyInfo.SetBounds(0, 28, 240, 24);
@@ -111,27 +114,27 @@ internal sealed class SettingsForm : Form
         _lblProxyInfo.ForeColor = Color.FromArgb(105, 105, 105);
         _lblProxyInfo.BackColor = Color.FromArgb(245, 245, 245);
 
-        // 恢复默认代理：清掉自定义反代与手填代理，回到内置默认代理
-        var btnRestoreDefault = new Button
+        // 代理填写指南：各种代理填写示例（http / socks5 / 反代）+ 反代搭建指南与代码
+        var btnGuide = new Button
         {
-            Text = "恢复默认代理",
+            Text = "代理填写指南",
             Bounds = new Rectangle(248, 28, 92, 24),
-            Font = new Font("Microsoft YaHei UI", 9),
+            Font = new Font("Microsoft YaHei UI", 8.5f),
             FlatStyle = FlatStyle.Flat
         };
-        btnRestoreDefault.FlatAppearance.BorderSize = 1;
-        btnRestoreDefault.FlatAppearance.BorderColor = Color.FromArgb(200, 200, 200);
-        btnRestoreDefault.Click += (_, _) => RestoreDefaultProxy();
+        btnGuide.FlatAppearance.BorderSize = 1;
+        btnGuide.FlatAppearance.BorderColor = Color.FromArgb(200, 200, 200);
+        btnGuide.Click += (_, _) => OpenProxyGuide();
 
         proxyPanel.Controls.Add(_txtProxy);
-        proxyPanel.Controls.Add(btnPickBest);
-        proxyPanel.Controls.Add(_lblProxyInfo);
         proxyPanel.Controls.Add(btnRestoreDefault);
+        proxyPanel.Controls.Add(_lblProxyInfo);
+        proxyPanel.Controls.Add(btnGuide);
         y = PlaceRow(rows, y, "当前代理", proxyPanel, 52);
         proxyPanel.Size = new Size(340, 52);
-        _tips.SetToolTip(btnPickBest, "实测各条链路并自动切换到最快的一级（内置默认代理不参与优选）");
         _tips.SetToolTip(_txtProxy, "显示当前生效的代理；可直接手填（socks5:// 或 http://，可含 user:pass@）并自动锁定使用；清空则回到自动链路");
         _tips.SetToolTip(btnRestoreDefault, "清除自定义反代与手填代理，回到内置默认代理（原配置将被覆盖）");
+        _tips.SetToolTip(btnGuide, "各种代理填写示例（http / socks5 / 反代）及反代搭建指南与代码");
 
         y = PlaceRow(rows, y, "开机自启", _autostart);
         y = PlaceRow(rows, y, "启动最小化到托盘", _startMinimized);
@@ -306,26 +309,12 @@ internal sealed class SettingsForm : Form
         };
         btnSave.FlatAppearance.BorderSize = 0;
         btnSave.Click += (_, _) => Close();
-        var btnHosts = new Button
-        {
-            Text = "代理管理…",
-            Location = new Point(110, 13),
-            Size = new Size(96, 26),
-            Font = new Font("Microsoft YaHei UI", 8),
-            FlatStyle = FlatStyle.Flat
-        };
-        btnHosts.FlatAppearance.BorderSize = 1;
-        btnHosts.FlatAppearance.BorderColor = Color.FromArgb(200, 200, 200);
-        btnHosts.Click += (_, _) => new ProxyManagerForm(_cfg, _api, () =>
-        {
-            // 代理池在管理页被修改：即时生效（API 客户端 + 缩略图客户端）
-            _api.SetProxies(_cfg.ProxyUrls, _cfg.ProxyUser, _cfg.ProxyPassword);
-            _onProxyChanged?.Invoke();
-        }).ShowDialog(this);
+        // v1.3.1：「代理管理…」（代理池 / 更新 / 源地址 / hosts）入口移除；
+        // 「打开日志」移到其原位置。
         var btnOpenLogs = new Button
         {
             Text = "打开日志",
-            Location = new Point(216, 13),
+            Location = new Point(110, 13),
             Size = new Size(86, 26),
             Font = new Font("Microsoft YaHei UI", 8),
             FlatStyle = FlatStyle.Flat
@@ -334,7 +323,6 @@ internal sealed class SettingsForm : Form
         btnOpenLogs.FlatAppearance.BorderColor = Color.FromArgb(200, 200, 200);
         btnOpenLogs.Click += (_, _) => OpenLogsFolder();
         footer.Controls.Add(versionLbl);
-        footer.Controls.Add(btnHosts);
         footer.Controls.Add(btnOpenLogs);
         footer.Controls.Add(btnSave);
 
@@ -344,8 +332,7 @@ internal sealed class SettingsForm : Form
         Controls.Add(footer);
 
         // 悬停提示：功能 + 快捷键
-        _tips.SetToolTip(btnHosts, "代理管理（代理池 / 更新 / 源地址）与 hosts 管理");
-        _tips.SetToolTip(btnOpenLogs, "打开日志文件夹（ hosts 更新、轮换等操作的详细日志）");
+        _tips.SetToolTip(btnOpenLogs, "打开日志文件夹（轮换等操作的详细日志）");
         _tips.SetToolTip(btnSave, "所有改动已即时保存，此按钮仅关闭窗口");
         _tips.SetToolTip(_cacheLimit, "本地缓存配额，超出按最近最少使用淘汰，改动立即生效");
         _tips.SetToolTip(btnClearCache, "清空全部原图与缩略图缓存，收藏不受影响");
@@ -502,7 +489,7 @@ internal sealed class SettingsForm : Form
         var bad = _lastLatency == null || _lastLatency == -1 || _lastLatency > LatencyThresholdMs;
         // 状态条宽 240px：提示语用短版，实测最长组合（默认代理 + 4 位延迟 + 提示）≈ 231px 不溢出
         _lblProxyInfo.Text = $"类型：{_api.ActiveTier}    延迟：{lat}"
-            + (bad ? "    ⚠ 建议优选" : "");
+            + (bad ? "    ⚠ 恢复默认" : "");
         _lblProxyInfo.ForeColor = bad ? Color.FromArgb(196, 90, 48) : Color.FromArgb(105, 105, 105);
     }
 
@@ -589,49 +576,65 @@ internal sealed class SettingsForm : Form
         await RefreshLatencyAsync();
     }
 
-    private async Task PickBestProxyAsync(Button btn)
+    /// <summary>
+    /// 打开「代理填写指南」（http / socks5 / 反代 的填写示例与搭建指南）。
+    /// 依次尝试 exe 同目录 → docs 子目录；都没有则从内嵌资源释放后再打开。
+    /// </summary>
+    private void OpenProxyGuide()
     {
-        var old = btn.Text;
-        btn.Enabled = false;
-        btn.Text = "优选中…";
-        _lblProxyInfo.Text = "正在实测各条链路…";
         try
         {
-            var r = await _api.PickBestAsync();
-            if (r == null)
+            var candidates = new[]
             {
-                if (_api.UsingDefaultMirror)
-                {
-                    // 默认代理不参与优选：此时"优选不到"= 其他链路实测都不可用，继续用默认代理即可
-                    await RefreshLatencyAsync();
-                    MessageBox.Show(
-                        "内置默认代理不参与优选。\n\n" +
-                        "其他链路（直连 / 自有反代 / 用户代理 / 公共池）实测均不可用，" +
-                        "将继续使用默认代理，无需处理。",
-                        "优选代理", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    return;
-                }
-                _lastLatency = -1;
-                UpdateProxyUi();
-                MessageBox.Show(
-                    "当前所有链路（直连 / 反代 / 用户代理 / 公共池）都无法访问 wallhaven。\n\n" +
-                    "建议：点「恢复默认代理」使用内置默认代理，或在「代理管理」中填入自己的反代地址。",
-                    "优选代理", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                Path.Combine(AppContext.BaseDirectory, "代理指引.txt"),
+                Path.Combine(AppContext.BaseDirectory, "docs", "代理指引.txt"),
+            };
+            var path = candidates.FirstOrDefault(File.Exists);
+            if (path != null)
+            {
+                Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
                 return;
             }
-            // 优选 = 自动功能：切到最快一级后把结果回填文本框（用户仍可再手改）
-            _cfg.ManualProxyLocked = false;
-            _cfg.ManualProxy = "";
-            _cfg.Save();
-            _lastLatency = r.Value.Ms;
-            UpdateProxyUi();
-            _onProxyChanged?.Invoke();
+            // 外部 txt 都不在 → 从内嵌资源释放到 exe 同目录（不可写则退到临时目录），再弹出
+            var text = ReadEmbeddedGuide();
+            if (text.Length == 0)
+            {
+                MessageBox.Show("未找到指引：外部 代理指引.txt 与内嵌资源均不可用", "提示",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            path = candidates[0];
+            try
+            {
+                File.WriteAllText(path, text, System.Text.Encoding.UTF8);
+            }
+            catch
+            {
+                // exe 目录可能不可写（如装在 Program Files）→ 释放到临时目录
+                path = Path.Combine(Path.GetTempPath(), "代理指引.txt");
+                File.WriteAllText(path, text, System.Text.Encoding.UTF8);
+            }
+            Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
         }
-        finally
+        catch (Exception ex)
         {
-            btn.Enabled = true;
-            btn.Text = old;
+            MessageBox.Show("打开指引失败：" + ex.Message, "提示",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
+    }
+
+    /// <summary>读取内嵌的代理指引（csproj 里 LogicalName = ponyo-proxy-guide.txt）。</summary>
+    private static string ReadEmbeddedGuide()
+    {
+        try
+        {
+            var asm = System.Reflection.Assembly.GetExecutingAssembly();
+            using var s = asm.GetManifestResourceStream("ponyo-proxy-guide.txt");
+            if (s == null) return "";
+            using var r = new StreamReader(s, System.Text.Encoding.UTF8);
+            return r.ReadToEnd();
+        }
+        catch { return ""; }
     }
 
     private void OpenLogsFolder()
